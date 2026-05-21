@@ -69,7 +69,7 @@ Output: `render.html` (or `--out path`) — open it in any browser, no server ne
 
 `visualize.write_html(env, out_path, bot_names=...)` reduces `env.toJSON()` to the minimal per-step state (planets, fleets, comets, rewards, actions) and inlines it into a single HTML file with a vanilla-JS viewer. No build step, no external assets — works offline, easy to share, easy to embed.
 
-The viewer also parses any line from your agent's stderr that looks like JSON and surfaces it in a per-agent debug panel. Useful for inspecting your bot's internal state turn-by-turn:
+If your agent prints a single-line JSON object to stderr each turn, the viewer pulls out the **last** `{...}` line per turn per agent and pretty-prints it inside that player's sidebar card. Useful for inspecting your bot's internal state turn-by-turn:
 
 ```python
 import json, sys
