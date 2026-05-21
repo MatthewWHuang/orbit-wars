@@ -118,8 +118,10 @@ def write_tournament_html(matches, out_path):
     return _write_multi(out_path, built)
 
 
-def _write_multi(out_path, matches):
+def _write_multi(out_path, matches, campaign_meta=None):
     payload = {"matches": matches}
+    if campaign_meta is not None:
+        payload["campaign"] = campaign_meta
     html = _TEMPLATE.replace(
         "__PAYLOAD__", _html.escape(json.dumps(payload), quote=False)
     )
@@ -198,11 +200,47 @@ _TEMPLATE = r"""<!doctype html>
     margin: 4px 0 12px 0; white-space: pre-wrap; word-break: break-word;
     max-height: 120px; overflow-y: auto; }
   label { font-size: 12px; color: var(--muted); }
+  /* --- campaign overlays --- */
+  #loreHeader { display: none; background: #1a223e; padding: 8px 10px;
+    border-radius: 6px; border-left: 3px solid #ffd966; margin-bottom: 4px; }
+  #loreHeader .terr-title { font-size: 14px; font-weight: 700; }
+  #loreHeader .terr-meta { font-size: 11px; color: #8a96b8; margin-top: 2px; }
+  #loreHeader .terr-lore { font-size: 12px; color: #c8d0e8; margin-top: 6px;
+    font-style: italic; line-height: 1.35; }
+  #loreHeader .terr-status { display: inline-block; padding: 1px 6px;
+    border-radius: 8px; font-size: 10px; font-weight: 700; margin-left: 6px;
+    vertical-align: middle; }
+  .status-won { background: #3ad17a; color: #000; }
+  .status-lost { background: #ff5a5a; color: #fff; }
+  .status-current { background: #ffd966; color: #000; }
+  .status-upcoming { background: #444; color: #ccc; }
+  #campaignMapWrap { display: none; background: #0a0f22; border-radius: 6px;
+    padding: 8px; }
+  #campaignMapWrap .title { color: #8a96b8; font-size: 10px;
+    text-transform: uppercase; letter-spacing: 1px; margin-bottom: 4px; }
+  #campaignMap { width: 100%; height: 200px; display: block; cursor: pointer; }
+  #cinemaTitleCard { display: none; position: fixed; top: 12vh; left: 0;
+    right: 0; text-align: center; pointer-events: none; z-index: 30;
+    opacity: 0; transition: opacity 0.6s ease; }
+  #cinemaTitleCard.show { opacity: 1; }
+  #cinemaTitleCard .ep { font-size: 13px; color: #8a96b8; letter-spacing: 6px;
+    text-transform: uppercase; font-weight: 600; }
+  #cinemaTitleCard .name { font-size: 64px; font-weight: 800; color: #fff;
+    text-shadow: 0 4px 32px rgba(0,0,0,0.9), 0 0 8px rgba(255,217,102,0.3);
+    letter-spacing: 4px; margin: 8px 0; }
+  #cinemaTitleCard .lore { font-size: 18px; color: #c8d0e8; font-style: italic;
+    max-width: 800px; margin: 12px auto 0; text-shadow: 0 2px 8px rgba(0,0,0,0.8); }
+  #cinemaTitleCard .npc { font-size: 15px; color: #ffd966; margin-top: 16px;
+    letter-spacing: 2px; text-shadow: 0 2px 8px rgba(0,0,0,0.8); }
+  #cinemaTitleCard .boss-tag { color: #ff5a5a; font-weight: 700; }
 </style>
 </head><body>
 <div class="wrap">
   <div class="side">
     <div class="tabs" id="tabList"></div>
+    <div id="loreHeader"></div>
+    <div id="campaignMapWrap"><div class="title">Campaign Map</div>
+      <canvas id="campaignMap"></canvas></div>
     <div id="sideContent" style="flex:1;overflow-y:auto;"></div>
   </div>
   <div class="board"><canvas id="board"></canvas></div>
@@ -213,6 +251,7 @@ _TEMPLATE = r"""<!doctype html>
     <div class="graph-panel" id="g3panel"><div class="title" id="g3title">Ship gain delta</div><canvas id="g3"></canvas></div>
   </div>
   <div class="cinema-hype"><canvas id="hypeCanvas"></canvas></div>
+  <div id="cinemaTitleCard"></div>
   <button id="cinemaExit">✕ Exit Cinema</button>
   <div class="controls">
     <button id="playBtn">Play</button>
@@ -233,6 +272,7 @@ _TEMPLATE = r"""<!doctype html>
 <script>
 const DATA = JSON.parse(document.getElementById === undefined ? "{}" : `__PAYLOAD__`);
 const MATCHES = DATA.matches;
+const CAMPAIGN = DATA.campaign || null;
 let currentMatchIdx = 0;
 let frames, debug, N_AGENTS, COLORS, NAMES, series;
 const NEUTRAL = "#888";
@@ -411,6 +451,7 @@ function resizeCanvases() {
     hypeCanvas.width = Math.max(1, Math.floor(r.width));
     hypeCanvas.height = Math.max(1, Math.floor(r.height));
   }
+  if (CAMPAIGN) drawCampaignMap();
   draw();
 }
 window.addEventListener('resize', resizeCanvases);
@@ -461,6 +502,189 @@ function computeSeries() {
   return s;
 }
 
+// ============================================================
+// CAMPAIGN OVERLAYS (lore header, strategic map, cinema title card)
+// ============================================================
+const loreHeaderEl = document.getElementById('loreHeader');
+const campaignMapWrap = document.getElementById('campaignMapWrap');
+const campaignMapEl = document.getElementById('campaignMap');
+const cinemaTitleCardEl = document.getElementById('cinemaTitleCard');
+
+if (CAMPAIGN) {
+  loreHeaderEl.style.display = '';
+  campaignMapWrap.style.display = '';
+}
+
+function _matchTerritoryId(matchIdx) {
+  const m = MATCHES[matchIdx];
+  return m && m.territory_id ? m.territory_id : null;
+}
+
+function _territoryStatus(tid) {
+  // Walk matches in order to find this territory. If it precedes current,
+  // it's won/lost; if it's current, "current"; if it never ran, "upcoming".
+  for (let i = 0; i < MATCHES.length; i++) {
+    if (MATCHES[i].territory_id === tid) {
+      if (i === currentMatchIdx) return 'current';
+      return MATCHES[i].won ? 'won' : 'lost';
+    }
+  }
+  return 'upcoming';
+}
+
+function _territoryPos(tid, W, H) {
+  // Layout: explicit pos in spec preferred. Fallback: ring layout.
+  const terr = CAMPAIGN.territories[tid];
+  if (terr && terr.pos) {
+    return [terr.pos[0] * (W - 40) + 20, terr.pos[1] * (H - 40) + 20];
+  }
+  const ids = Object.keys(CAMPAIGN.territories);
+  const i = ids.indexOf(tid);
+  const a = (i / Math.max(1, ids.length)) * Math.PI * 2 - Math.PI / 2;
+  return [W / 2 + Math.cos(a) * (W / 2 - 30), H / 2 + Math.sin(a) * (H / 2 - 30)];
+}
+
+function renderLoreHeader() {
+  if (!CAMPAIGN) return;
+  const tid = _matchTerritoryId(currentMatchIdx);
+  if (!tid) { loreHeaderEl.style.display = 'none'; return; }
+  const terr = CAMPAIGN.territories[tid];
+  if (!terr) { loreHeaderEl.style.display = 'none'; return; }
+  const m = MATCHES[currentMatchIdx];
+  const stat = _territoryStatus(tid);
+  const ep = m.episode ? `Ep ${m.episode}` : '';
+  const bossTag = terr.boss ? ' <span style="color:#ff5a5a">[BOSS]</span>' : '';
+  const niceName = tid.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+  loreHeaderEl.style.display = '';
+  loreHeaderEl.innerHTML = `
+    <div class="terr-title">${ep ? ep + ' &middot; ' : ''}${niceName}${bossTag}
+      <span class="terr-status status-${stat}">${stat.toUpperCase()}</span></div>
+    <div class="terr-meta">vs ${terr.npc || '?'} &middot; seed ${m.seed ?? '?'}</div>
+    ${terr.lore ? `<div class="terr-lore">"${terr.lore}"</div>` : ''}
+  `;
+}
+
+function drawCampaignMap() {
+  if (!CAMPAIGN) return;
+  const canvas = campaignMapEl;
+  const ctx = canvas.getContext('2d');
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = Math.max(1, Math.floor(rect.width));
+  canvas.height = Math.max(1, Math.floor(rect.height));
+  const W = canvas.width, H = canvas.height;
+  ctx.fillStyle = '#0a0f22';
+  ctx.fillRect(0, 0, W, H);
+  const ids = Object.keys(CAMPAIGN.territories);
+
+  // Edges
+  ctx.strokeStyle = '#2a3560';
+  ctx.lineWidth = 1.5;
+  const drawn = new Set();
+  for (const tid of ids) {
+    for (const n of (CAMPAIGN.territories[tid].neighbors || [])) {
+      if (!CAMPAIGN.territories[n]) continue;
+      const key = [tid, n].sort().join('|');
+      if (drawn.has(key)) continue;
+      drawn.add(key);
+      const [x1, y1] = _territoryPos(tid, W, H);
+      const [x2, y2] = _territoryPos(n, W, H);
+      ctx.beginPath();
+      ctx.moveTo(x1, y1); ctx.lineTo(x2, y2);
+      ctx.stroke();
+    }
+  }
+
+  // Nodes
+  for (const tid of ids) {
+    const [x, y] = _territoryPos(tid, W, H);
+    const terr = CAMPAIGN.territories[tid];
+    const stat = _territoryStatus(tid);
+    const r = terr.boss ? 14 : 10;
+    let fill, stroke;
+    if (stat === 'won') { fill = '#3ad17a'; stroke = '#1a8050'; }
+    else if (stat === 'lost') { fill = '#ff5a5a'; stroke = '#a02020'; }
+    else if (stat === 'current') { fill = '#ffd966'; stroke = '#fff'; }
+    else { fill = '#2a3560'; stroke = '#444a6a'; }
+    ctx.fillStyle = fill;
+    ctx.strokeStyle = stroke;
+    ctx.lineWidth = stat === 'current' ? 2.5 : 1.2;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    if (terr.boss) {
+      ctx.fillStyle = '#ffd966';
+      ctx.beginPath();
+      ctx.moveTo(x, y - r - 9);
+      ctx.lineTo(x - 5, y - r - 1);
+      ctx.lineTo(x - 2, y - r - 4);
+      ctx.lineTo(x, y - r - 1);
+      ctx.lineTo(x + 2, y - r - 4);
+      ctx.lineTo(x + 5, y - r - 1);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.fillStyle = stat === 'upcoming' ? '#7a86a8' : '#e8edf7';
+    ctx.font = stat === 'current' ? 'bold 10px sans-serif' : '10px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillText(tid.replace(/_/g, ' '), x, y + r + 3);
+  }
+}
+
+function campaignMapClick(e) {
+  if (!CAMPAIGN) return;
+  const rect = campaignMapEl.getBoundingClientRect();
+  const mx = (e.clientX - rect.left) * (campaignMapEl.width / rect.width);
+  const my = (e.clientY - rect.top) * (campaignMapEl.height / rect.height);
+  const W = campaignMapEl.width, H = campaignMapEl.height;
+  for (const tid of Object.keys(CAMPAIGN.territories)) {
+    const [x, y] = _territoryPos(tid, W, H);
+    const terr = CAMPAIGN.territories[tid];
+    const r = terr.boss ? 14 : 10;
+    if (Math.hypot(mx - x, my - y) <= r + 3) {
+      // Only jump if a match exists for this territory
+      for (let i = 0; i < MATCHES.length; i++) {
+        if (MATCHES[i].territory_id === tid) { loadMatch(i); return; }
+      }
+      return;
+    }
+  }
+}
+if (campaignMapEl) campaignMapEl.onclick = campaignMapClick;
+
+let _titleCardTimers = [];
+function showCinemaTitleCard() {
+  if (!CAMPAIGN) return;
+  const tid = _matchTerritoryId(currentMatchIdx);
+  if (!tid) return;
+  const terr = CAMPAIGN.territories[tid];
+  if (!terr) return;
+  const m = MATCHES[currentMatchIdx];
+  const niceName = tid.replace(/_/g, ' ').toUpperCase();
+  const epLabel = terr.boss ? '<span class="boss-tag">FINAL BATTLE</span>'
+    : `EPISODE ${m.episode ?? (currentMatchIdx + 1)}`;
+  cinemaTitleCardEl.innerHTML = `
+    <div class="ep">${epLabel}</div>
+    <div class="name">${niceName}</div>
+    ${terr.lore ? `<div class="lore">"${terr.lore}"</div>` : ''}
+    <div class="npc">vs ${(terr.npc || '?').toUpperCase()}</div>
+  `;
+  // Clear any in-flight fade timers from a previous card.
+  for (const t of _titleCardTimers) clearTimeout(t);
+  _titleCardTimers = [];
+  cinemaTitleCardEl.style.display = 'block';
+  // Force a reflow so the transition fires when we add .show.
+  void cinemaTitleCardEl.offsetWidth;
+  cinemaTitleCardEl.classList.add('show');
+  _titleCardTimers.push(setTimeout(() => {
+    cinemaTitleCardEl.classList.remove('show');
+    _titleCardTimers.push(setTimeout(() => {
+      cinemaTitleCardEl.style.display = 'none';
+    }, 700));
+  }, 3200));
+}
+
 function loadMatch(idx) {
   currentMatchIdx = idx;
   const m = MATCHES[idx];
@@ -490,6 +714,8 @@ function loadMatch(idx) {
   for (const el of tabList.querySelectorAll('.tab')) {
     el.classList.toggle('active', parseInt(el.dataset.idx) === idx);
   }
+  renderLoreHeader();
+  drawCampaignMap();
   draw();
 }
 
@@ -2407,6 +2633,7 @@ function startCinema() {
   requestAnimationFrame(() => resizeCanvases());
   if (cinemaRAF) cancelAnimationFrame(cinemaRAF);
   cinemaRAF = requestAnimationFrame(cinemaTick);
+  showCinemaTitleCard();
 }
 
 function stopCinema() {
@@ -2418,6 +2645,11 @@ function stopCinema() {
   cinemaBtn.style.background = '#7a2b8c';
   document.body.classList.remove('cinema-active');
   cinemaState = null;
+  // Yank the title card if it's still visible
+  for (const t of _titleCardTimers) clearTimeout(t);
+  _titleCardTimers = [];
+  cinemaTitleCardEl.classList.remove('show');
+  cinemaTitleCardEl.style.display = 'none';
   // Defer the resize so the grid layout has reflowed back to its non-cinema
   // template before we measure the canvas's new parent dimensions. Bail out
   // if cinema has been re-entered before the deferred frame fires.

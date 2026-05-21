@@ -116,15 +116,21 @@ def _resolve_bot(bot_arg, repo_root):
     """Accepts main.py path, a folder containing main.py, or 'random'."""
     if bot_arg == "random":
         return "random"
-    if os.path.isabs(bot_arg) or os.path.exists(bot_arg):
-        path = bot_arg
+    candidates = []
+    if os.path.isabs(bot_arg):
+        candidates.append(bot_arg)
     else:
-        path = os.path.join(repo_root, bot_arg)
-    if os.path.isdir(path):
-        path = os.path.join(path, "main.py")
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"Bot not found: {bot_arg} (looked at {path})")
-    return os.path.abspath(path)
+        candidates.append(os.path.normpath(os.path.join(os.getcwd(), bot_arg)))
+        candidates.append(os.path.normpath(os.path.join(repo_root, bot_arg)))
+        # Parent-repo convention: bots live under ./bots/<name>/. Try that too.
+        candidates.append(os.path.normpath(os.path.join(repo_root, "..", "bots", bot_arg)))
+    for c in candidates:
+        path = c
+        if os.path.isdir(path):
+            path = os.path.join(path, "main.py")
+        if os.path.exists(path):
+            return os.path.abspath(path)
+    raise FileNotFoundError(f"Bot not found: {bot_arg} (tried {candidates})")
 
 
 def _resolve_npc(npc_name, repo_root):
@@ -214,7 +220,7 @@ def walk_campaign(spec, bot_path, repo_root, make):
 
 def build_payload(results, spec, bot_path, repo_root):
     """Adapt each match into the visualize.py multi-match payload format,
-    encoding territory info into the per-match label."""
+    embedding territory metadata per-match. Returns (matches, campaign_meta)."""
     from visualize import _build_match
 
     hero_name = os.path.basename(os.path.dirname(bot_path)) or os.path.basename(bot_path)
@@ -230,8 +236,29 @@ def build_payload(results, spec, bot_path, repo_root):
             label=label,
             seed=r["spec"]["seed"],
         )
+        match["territory_id"] = t_id
+        match["won"] = r["won"]
+        match["episode"] = i
         matches.append(match)
-    return matches
+
+    boss_id = spec.get("boss")
+    campaign_meta = {
+        "name": spec.get("name", "Campaign"),
+        "hero": hero_name,
+        "start": spec.get("start"),
+        "boss": boss_id,
+        "territories": {
+            tid: {
+                "lore": tspec.get("lore", ""),
+                "neighbors": tspec.get("neighbors", []),
+                "npc": tspec.get("npc"),
+                "pos": tspec.get("pos"),
+                "boss": tid == boss_id,
+            }
+            for tid, tspec in spec["territories"].items()
+        },
+    }
+    return matches, campaign_meta
 
 
 def main():
@@ -270,9 +297,9 @@ def main():
     print(f"\nFinal: {wins}/{total} territories conquered.")
 
     from visualize import _write_multi
-    matches = build_payload(results, spec, bot_path, repo_root)
+    matches, campaign_meta = build_payload(results, spec, bot_path, repo_root)
     out_path = args.out if os.path.isabs(args.out) else os.path.join(repo_root, args.out)
-    abs_out = _write_multi(out_path, matches)
+    abs_out = _write_multi(out_path, matches, campaign_meta=campaign_meta)
     print(f"Wrote {abs_out}")
 
     if not args.no_open:
