@@ -193,10 +193,10 @@ def main():
         {"env": env_json, "bot_names": bot_names, "seed": seed}
         for env_json, bot_names, seed in results
     ]
-    abs_out = write_tournament_html(matches_payload, args.out)
+    abs_out = write_tournament_html(matches_payload, args.out, auto_cinema=args.cinema)
     print(f"Wrote {abs_out}")
     if not args.no_open:
-        webbrowser.open(f"file://{abs_out}" + ("#cinema" if args.cinema else ""))
+        webbrowser.open(f"file://{abs_out}")
 
 
 if __name__ == "__main__":

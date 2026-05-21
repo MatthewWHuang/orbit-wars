@@ -102,12 +102,12 @@ def _build_match(env, bot_names=None, label=None, seed=None):
     }
 
 
-def write_html(env, out_path, bot_names=None):
+def write_html(env, out_path, bot_names=None, auto_cinema=False):
     match = _build_match(env, bot_names=bot_names)
-    return _write_multi(out_path, [match])
+    return _write_multi(out_path, [match], auto_cinema=auto_cinema)
 
 
-def write_tournament_html(matches, out_path):
+def write_tournament_html(matches, out_path, auto_cinema=False):
     """matches: list of dicts {env_json|env, bot_names, seed} OR pre-built match payloads."""
     built = []
     for m in matches:
@@ -115,11 +115,11 @@ def write_tournament_html(matches, out_path):
             built.append(m)
         else:
             built.append(_build_match(m["env"], bot_names=m.get("bot_names"), seed=m.get("seed")))
-    return _write_multi(out_path, built)
+    return _write_multi(out_path, built, auto_cinema=auto_cinema)
 
 
-def _write_multi(out_path, matches):
-    payload = {"matches": matches}
+def _write_multi(out_path, matches, auto_cinema=False):
+    payload = {"matches": matches, "autoCinema": bool(auto_cinema)}
     html = _TEMPLATE.replace(
         "__PAYLOAD__", _html.escape(json.dumps(payload), quote=False)
     )
@@ -1161,9 +1161,17 @@ function detectEvents(frames, series, N_AGENTS, NAMES) {
     }
     // 2) Fleet impacts: fleets present at t-1 not present at t -> died
     const curFleetIds = new Set(cur.fleets.map(f => f[0]));
+    const finalFrame = frames[frames.length - 1];
     for (const f of prev.fleets) {
       if (curFleetIds.has(f[0])) continue;
-      // It was destroyed. Where? Use last known position; nearest planet at t.
+      // Project the fleet forward one tick to figure out *why* it died.
+      const speed = fleetSpeed(f[6]);
+      const vx = Math.cos(f[4]) * speed;
+      const vy = Math.sin(f[4]) * speed;
+      const nextX = f[2] + vx;
+      const nextY = f[3] + vy;
+      const wentOOB = nextX < 0 || nextX > 100 || nextY < 0 || nextY > 100;
+      // Nearest planet / sun for non-OOB classification.
       let near = null, nearD = 1e9;
       for (const p of cur.planets) {
         const d = Math.hypot(p[2] - f[2], p[3] - f[3]);
@@ -1171,6 +1179,39 @@ function detectEvents(frames, series, N_AGENTS, NAMES) {
       }
       const hitSun = Math.hypot(f[2] - 50, f[3] - 50) < 14;
       const targetIsComet = near && (cur.comet_planet_ids || []).includes(near[0]);
+
+      // Game-ending edge-out: the owner of this fleet has nothing left after
+      // it dies, the fleet's projected position is off the board, and the
+      // game ends within a few ticks (so it's actually a final action).
+      if (wentOOB) {
+        const owner = f[1];
+        const ownerGoneNow = owner >= 0 &&
+          !cur.fleets.some(fl => fl[1] === owner) &&
+          !cur.planets.some(p => p[1] === owner);
+        const ownerGoneAtEnd = owner >= 0 &&
+          !finalFrame.fleets.some(fl => fl[1] === owner) &&
+          !finalFrame.planets.some(p => p[1] === owner);
+        if (ownerGoneNow && ownerGoneAtEnd && t >= frames.length - 6) {
+          // Solve fleet line vs the [0,100]^2 boundary -- where does it cross?
+          let aCross = 1.0;
+          if (vx > 1e-6) aCross = Math.min(aCross, (100 - f[2]) / vx);
+          else if (vx < -1e-6) aCross = Math.min(aCross, -f[2] / vx);
+          if (vy > 1e-6) aCross = Math.min(aCross, (100 - f[3]) / vy);
+          else if (vy < -1e-6) aCross = Math.min(aCross, -f[3] / vy);
+          aCross = Math.max(0, Math.min(1, aCross));
+          const exitX = f[2] + vx * aCross;
+          const exitY = f[3] + vy * aCross;
+          events.push({
+            t, type: 'edge_out',
+            x: exitX, y: exitY,
+            fleetX: f[2], fleetY: f[3],
+            angle: f[4], ships: f[6], owner,
+            importance: 999,
+          });
+          continue;
+        }
+      }
+
       events.push({
         t, type: hitSun ? 'sun_death' : (targetIsComet ? 'comet_sweep' : 'impact'),
         x: f[2], y: f[3],
@@ -1283,7 +1324,13 @@ function buildShots(selected, totalSteps) {
     }
     // Approach: pan to event with zoom; longer so the camera glide is visible.
     const isFinal = e.type === 'final_capture';
+    const isEdgeOut = e.type === 'edge_out';
+    // Frame edge-outs wide so the boundary is visible; aim camera at the
+    // midpoint between the fleet's current position and its exit point.
+    const focusX = isEdgeOut ? (e.fleetX + e.x) * 0.5 : e.x;
+    const focusY = isEdgeOut ? (e.fleetY + e.y) * 0.5 : e.y;
     const focusZoom =
+      isEdgeOut                ? 0.85 :
       isFinal                  ? 2.4 :
       e.type === 'lead_change' ? 1.1 :
       e.type === 'comet_spawn' ? 1.7 :
@@ -1293,23 +1340,20 @@ function buildShots(selected, totalSteps) {
     shots.push({
       kind: 'approach', event: e,
       atStep: Math.max(lastEnd + 1, e.t - 3),
-      target: { cx: e.x, cy: e.y, zoom: focusZoom },
-      duration: isFinal ? 90 : 55,
+      target: { cx: focusX, cy: focusY, zoom: focusZoom },
+      duration: (isFinal || isEdgeOut) ? 90 : 55,
     });
-    // Slo-mo: continues from wherever the approach left us, slowing time as
-    // we close on the event step. Final capture goes much slower.
     shots.push({
       kind: 'slowmo', event: e,
       fromStep: Math.max(lastEnd + 1, e.t - 2), toStep: e.t,
-      stepsPerFrame: isFinal ? 0.015 : 0.04,
-      target: { cx: e.x, cy: e.y, zoom: focusZoom },
+      stepsPerFrame: (isFinal || isEdgeOut) ? 0.015 : 0.04,
+      target: { cx: focusX, cy: focusY, zoom: focusZoom },
     });
-    // Impact freeze + caption read time -- longer hold and extra zoom for finals
     shots.push({
       kind: 'impact', event: e,
       atStep: e.t,
-      holdFrames: isFinal ? 280 : 110,
-      target: { cx: e.x, cy: e.y, zoom: focusZoom * (isFinal ? 1.15 : 1.08) },
+      holdFrames: (isFinal || isEdgeOut) ? 280 : 110,
+      target: { cx: focusX, cy: focusY, zoom: focusZoom * (isFinal ? 1.15 : 1.0) },
     });
     // Decompress: pull back to wide before next event
     shots.push({
@@ -1447,6 +1491,8 @@ function buildCinema() {
     fleetTrails: new Map(),   // fleet_id -> [{x,y,owner}, ...] last positions
     damageNumbers: [],        // floating numbers from planet ship-count changes
     lastSeenStepBoundary: -1, // for one-shot per-step transitions
+    edgeFlashAlpha: 0,        // current opacity of the red map-edge border
+    edgeFlashTarget: 0,       // target opacity (lerped toward in drawCinemaFrame)
   };
 }
 
@@ -1580,6 +1626,26 @@ function triggerEventEffects(state, event) {
       pushCaption(state, 'FINAL BLOW', `${winName} wins`, toCol, 280);
       bumpShake(60);
       state.victoryFlash = { color: toCol, age: 0, life: 60 };
+      break;
+    }
+    case 'edge_out': {
+      // Last enemy ship flies off the edge of the map. Big red explosion
+      // *at the boundary intersection*, multiple shockwaves in red and the
+      // map-edge red glow snaps to peak brightness (then fades via lerp).
+      const loserName = event.owner >= 0 ? NAMES[event.owner] : '';
+      spawnExplosion(state, event.x, event.y, '#ff3a3a', 120, 4.0);
+      spawnExplosion(state, event.x, event.y, '#ff8a4a', 60, 3.0);
+      spawnExplosion(state, event.x, event.y, '#ffffff', 30, 5.0);
+      spawnRing(state, event.x, event.y, '#ff5a5a', 12, 80);
+      spawnRing(state, event.x, event.y, '#ff9a5a', 22, 110);
+      pushCaption(state, 'INTO THE VOID', `${loserName} eliminated`, '#ff5a5a', 280);
+      bumpShake(55);
+      // Brighten the border to max for the impact frame; fade out is
+      // managed by edgeFlashTarget toggling later in the impact shot.
+      state.edgeFlashAlpha = 1;
+      state.edgeFlashTarget = 1;
+      // Subtle red overlay for the screen flash
+      state.victoryFlash = { color: '#ff3a3a', age: 0, life: 50 };
       break;
     }
     case 'impact': {
@@ -2063,12 +2129,22 @@ function drawCinemaFrame() {
       bctx.beginPath();
       bctx.arc(px + sx, py + sy, sr + 4, 0, PI2);
       bctx.stroke();
-      // Text badge
+      // Text badge. Drop it below the planet if there's no headroom above
+      // (so it doesn't clash with the top progress bar/timeline strip).
       const fs = Math.max(9, gameScale * cam.zoom * 1.5);
+      const textTop = py + sy - sr - 6 - fs;
+      const placeBelow = textTop < 36;
       bctx.fillStyle = '#ff5a5a';
       bctx.font = `bold ${fs}px sans-serif`;
-      bctx.textAlign = 'center'; bctx.textBaseline = 'bottom';
-      bctx.fillText(`CONTESTED ×${liveCount}`, px + sx, py + sy - sr - 6);
+      bctx.textAlign = 'center';
+      bctx.textBaseline = placeBelow ? 'top' : 'bottom';
+      const ty = placeBelow ? py + sy + sr + 6 : py + sy - sr - 6;
+      // Translucent backing for legibility
+      const w = bctx.measureText(`CONTESTED ×${liveCount}`).width + 12;
+      bctx.fillStyle = '#000a';
+      bctx.fillRect(px + sx - w / 2, ty - (placeBelow ? 2 : fs + 2), w, fs + 4);
+      bctx.fillStyle = '#ff5a5a';
+      bctx.fillText(`CONTESTED ×${liveCount}`, px + sx, ty);
     }
     // Floating damage numbers (single draw with shadow for outline)
     bctx.textAlign = 'center'; bctx.textBaseline = 'middle';
@@ -2125,6 +2201,32 @@ function drawCinemaFrame() {
   bctx.fillStyle = vg;
   bctx.fillRect(0, 0, W, H);
 
+  // Edge-of-map red border (game-ending OOB elimination effect). Alpha
+  // lerps toward edgeFlashTarget; rendered as a stroked rect projected
+  // through the camera so it tracks zoom/pan/shake.
+  if (cinemaState.edgeFlashAlpha === undefined) cinemaState.edgeFlashAlpha = 0;
+  const eTarget = cinemaState.edgeFlashTarget || 0;
+  cinemaState.edgeFlashAlpha += (eTarget - cinemaState.edgeFlashAlpha) * 0.06;
+  if (cinemaState.edgeFlashAlpha > 0.02) {
+    const ea = cinemaState.edgeFlashAlpha;
+    const [ex1, ey1] = projectCam(0, 0, cam, W, H);
+    const [ex2, ey2] = projectCam(100, 100, cam, W, H);
+    // Pulsing thickness for drama
+    const pulse = 0.85 + 0.15 * Math.sin(cinemaState.stepFloat * 1.5);
+    const lw = (3 + 6 * ea) * pulse;
+    // Outer glow
+    bctx.shadowColor = `rgba(255, 70, 70, ${ea * 0.95})`;
+    bctx.shadowBlur = 18 * ea;
+    bctx.strokeStyle = `rgba(255, 60, 60, ${ea * 0.9})`;
+    bctx.lineWidth = lw;
+    bctx.strokeRect(ex1 + sx, ey1 + sy, ex2 - ex1, ey2 - ey1);
+    // Inner bright line on top of the glow
+    bctx.shadowBlur = 0;
+    bctx.strokeStyle = `rgba(255, 170, 170, ${ea})`;
+    bctx.lineWidth = Math.max(1, lw * 0.35);
+    bctx.strokeRect(ex1 + sx, ey1 + sy, ex2 - ex1, ey2 - ey1);
+  }
+
   // Victory flash -- full-screen tinted overlay that fades out after the
   // game-ending capture.
   if (cinemaState.victoryFlash) {
@@ -2142,7 +2244,8 @@ function drawCinemaFrame() {
   }
 
   // Captions (only one rendered at a time -- pushCaption replaces; we just
-  // age the current one and drop it on expiry).
+  // age the current one and drop it on expiry). Positioned above the hype
+  // panel (which starts at H * 0.78) so they don't collide with HIGHLIGHTS.
   if (cinemaState.captions.length) {
     const c = cinemaState.captions[0];
     c.age++;
@@ -2151,16 +2254,23 @@ function drawCinemaFrame() {
     } else {
       const a = (c.age < 10) ? c.age / 10 : (c.age > c.life - 20 ? (c.life - c.age) / 20 : 1);
       bctx.globalAlpha = a;
-      bctx.font = `bold ${Math.floor(W * 0.05)}px sans-serif`;
+      // Cap title font so 4K monitors don't get a 200px headline.
+      const titleFs = Math.min(72, Math.floor(W * 0.045));
+      const subFs = Math.min(26, Math.floor(W * 0.018));
+      bctx.font = `bold ${titleFs}px sans-serif`;
       bctx.textAlign = 'center'; bctx.textBaseline = 'middle';
+      const titleY = H * 0.60;       // above the hype panel band
+      const subY = titleY + titleFs * 0.95;
+      const boxTop = titleY - titleFs * 0.75;
+      const boxH = titleFs * (c.sub ? 2.0 : 1.5);
       bctx.fillStyle = '#000a';
-      bctx.fillRect(0, H * 0.78 - Math.floor(W * 0.035), W, Math.floor(W * 0.075));
+      bctx.fillRect(0, boxTop, W, boxH);
       bctx.fillStyle = c.color;
-      bctx.fillText(c.text, W/2, H * 0.78);
+      bctx.fillText(c.text, W/2, titleY);
       if (c.sub) {
-        bctx.font = `${Math.floor(W * 0.022)}px sans-serif`;
+        bctx.font = `${subFs}px sans-serif`;
         bctx.fillStyle = '#fff';
-        bctx.fillText(c.sub, W/2, H * 0.78 + Math.floor(W * 0.035));
+        bctx.fillText(c.sub, W/2, subY);
       }
       bctx.globalAlpha = 1;
     }
@@ -2209,7 +2319,9 @@ function drawCinemaFrame() {
     bctx.globalAlpha = 1;
   }
 
-  // Mid-action stat callout during slowmo/approach shots
+  // Mid-action stat callout during slowmo/approach shots.
+  // Drawn in the top-LEFT, well clear of the top-right Exit button and the
+  // bottom hype panel.
   {
     const curShot = cinemaState.shots[cinemaState.shotIdx];
     if (curShot && (curShot.kind === 'slowmo' || curShot.kind === 'approach') && curShot.event) {
@@ -2218,7 +2330,6 @@ function drawCinemaFrame() {
       if (e.type === 'big_fleet' || e.type === 'impact' || e.type === 'comet_sweep') {
         lines.push(`FLEET: ${e.ships ?? '?'} SHIPS`);
         if (e.targetPid !== null && e.targetPid !== undefined) {
-          // Time-to-impact estimate from current step
           const ttI = Math.max(0, e.t - cinemaState.stepFloat);
           if (ttI > 0.1) lines.push(`IMPACT IN: ${ttI.toFixed(1)}t`);
         }
@@ -2230,17 +2341,21 @@ function drawCinemaFrame() {
         lines.push('COMET TRAJECTORY LOCKED');
       }
       if (lines.length) {
-        const fs = Math.max(13, W * 0.018);
+        const fs = Math.min(22, Math.max(12, W * 0.014));
         bctx.font = `bold ${fs}px sans-serif`;
-        bctx.textAlign = 'left'; bctx.textBaseline = 'top';
+        bctx.textAlign = 'left'; bctx.textBaseline = 'middle';
         bctx.globalAlpha = 0.92;
-        let y = H * 0.08;
+        let y = H * 0.10;
+        const padBox = fs * 0.5;
+        // Compute box width once based on the widest line
+        let maxW = 0;
+        for (const ln of lines) maxW = Math.max(maxW, bctx.measureText(ln).width);
+        bctx.fillStyle = '#000a';
+        bctx.fillRect(W * 0.025, y - fs * 0.8, maxW + padBox * 2, lines.length * fs * 1.4 + padBox);
         for (const ln of lines) {
-          bctx.fillStyle = '#000';
-          for (let k = -1; k <= 1; k++) for (let l = -1; l <= 1; l++) bctx.fillText(ln, W * 0.04 + k, y + l);
           bctx.fillStyle = '#ffd966';
-          bctx.fillText(ln, W * 0.04, y);
-          y += fs * 1.3;
+          bctx.fillText(ln, W * 0.025 + padBox, y);
+          y += fs * 1.4;
         }
         bctx.globalAlpha = 1;
       }
@@ -2483,13 +2598,17 @@ function advanceShot() {
     cinemaState.cam.tcy = shot.target.cy;
     cinemaState.cam.tzoom = shot.target.zoom;
   }
-  // Only step *forward* on shot transitions -- never rewind. This used to
-  // jump backwards by one game tick at the start of each slowmo/impact shot.
   if (shot.fromStep !== undefined) {
     cinemaState.stepFloat = Math.max(cinemaState.stepFloat, shot.fromStep);
   }
   if (shot.atStep !== undefined) {
     cinemaState.stepFloat = Math.max(cinemaState.stepFloat, shot.atStep);
+  }
+  // Edge-out border: start fading in on approach/slowmo of edge_out shots,
+  // start fading out partway through the impact hold.
+  const isEdgeShot = shot.event && shot.event.type === 'edge_out';
+  if (isEdgeShot && (shot.kind === 'approach' || shot.kind === 'slowmo')) {
+    cinemaState.edgeFlashTarget = 1;
   }
   return true;
 }
@@ -2556,6 +2675,11 @@ function cinemaTick() {
       if (cinemaState.shotFrame === 1) {
         triggerEventEffects(cinemaState, shot.event);
       }
+      // Start fading out the edge-flash border partway through the hold.
+      if (shot.event && shot.event.type === 'edge_out' &&
+          cinemaState.shotFrame === Math.floor(shot.holdFrames * 0.4)) {
+        cinemaState.edgeFlashTarget = 0;
+      }
       if (cinemaState.shotFrame >= shot.holdFrames) advanceShot();
       break;
     }
@@ -2614,8 +2738,9 @@ window.addEventListener('keydown', (e) => {
   if (cinemaMode && e.key === 'Escape') { stopCinema(); e.preventDefault(); }
 });
 
-// Auto-start if URL has #cinema/#ultra (kept as an alias) or ?cinema=1.
+// Auto-start if Python baked the flag in, or URL has #cinema/?cinema=1.
 const autoCinema =
+  DATA.autoCinema === true ||
   location.hash.includes('cinema') || location.hash.includes('ultra') ||
   new URLSearchParams(location.search).get('cinema') === '1' ||
   new URLSearchParams(location.search).get('ultra') === '1';

@@ -167,10 +167,9 @@ def main():
 
     if not args.no_render:
         from visualize import write_html
-        abs_out = write_html(env, args.out, bot_names=bots)
+        abs_out = write_html(env, args.out, bot_names=bots, auto_cinema=args.cinema)
         print(f"Render written to {abs_out}")
-        url = f"file://{abs_out}" + ("#cinema" if args.cinema else "")
-        webbrowser.open(url)
+        webbrowser.open(f"file://{abs_out}")
 
 
 if __name__ == "__main__":
