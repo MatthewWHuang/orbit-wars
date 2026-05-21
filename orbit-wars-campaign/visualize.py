@@ -556,11 +556,12 @@ function renderLoreHeader() {
   const bossTag = terr.boss ? ' <span style="color:#ff5a5a">[BOSS]</span>' : '';
   const niceName = tid.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
   loreHeaderEl.style.display = '';
+  // Lore quote is reserved for the cinema title card -- keep the normal-mode
+  // header compact so the side panel stays scannable.
   loreHeaderEl.innerHTML = `
     <div class="terr-title">${ep ? ep + ' &middot; ' : ''}${niceName}${bossTag}
       <span class="terr-status status-${stat}">${stat.toUpperCase()}</span></div>
     <div class="terr-meta">vs ${terr.npc || '?'} &middot; seed ${m.seed ?? '?'}</div>
-    ${terr.lore ? `<div class="terr-lore">"${terr.lore}"</div>` : ''}
   `;
 }
 
@@ -2521,6 +2522,21 @@ function advanceShot() {
   cinemaState.shotIdx++;
   cinemaState.shotFrame = 0;
   if (cinemaState.shotIdx >= cinemaState.shots.length) {
+    // Campaign auto-chain: if more matches remain, load the next one and
+    // rebuild cinema state in place. The new title card overlays the first
+    // frame of the next match, giving us a free "interstitial" beat.
+    if (CAMPAIGN && currentMatchIdx < MATCHES.length - 1) {
+      loadMatch(currentMatchIdx + 1);
+      cinemaState = buildCinema();
+      const s0 = cinemaState.shots[0];
+      if (s0?.target) {
+        cinemaState.cam.cx = cinemaState.cam.tcx = s0.target.cx;
+        cinemaState.cam.cy = cinemaState.cam.tcy = s0.target.cy;
+        cinemaState.cam.zoom = cinemaState.cam.tzoom = s0.target.zoom;
+      }
+      showCinemaTitleCard();
+      return true;
+    }
     stopCinema();
     return false;
   }
