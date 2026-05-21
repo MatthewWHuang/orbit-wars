@@ -113,17 +113,18 @@ def _import_make():
 
 
 def _resolve_bot(bot_arg, repo_root):
-    """Accepts main.py path, a folder containing main.py, or 'random'."""
+    """Accepts main.py path, a folder containing main.py, or 'random'.
+    Falls back to ../bots/<name>/ (the parent-repo convention)."""
     if bot_arg == "random":
         return "random"
+    parent_bots = os.path.normpath(os.path.join(repo_root, "..", "bots"))
     candidates = []
     if os.path.isabs(bot_arg):
         candidates.append(bot_arg)
     else:
         candidates.append(os.path.normpath(os.path.join(os.getcwd(), bot_arg)))
         candidates.append(os.path.normpath(os.path.join(repo_root, bot_arg)))
-        # Parent-repo convention: bots live under ./bots/<name>/. Try that too.
-        candidates.append(os.path.normpath(os.path.join(repo_root, "..", "bots", bot_arg)))
+        candidates.append(os.path.normpath(os.path.join(parent_bots, bot_arg)))
     for c in candidates:
         path = c
         if os.path.isdir(path):
@@ -267,8 +268,8 @@ def main():
     parser.add_argument("--spec", default="territories.json", help="Campaign spec JSON")
     parser.add_argument("--out", default="campaign.html", help="Output HTML path")
     parser.add_argument("--no-open", action="store_true", help="Do not open the browser")
-    parser.add_argument("--cinema", action="store_true", help="Open viewer in cinema mode")
-    parser.add_argument("--ultra", action="store_true", help="Open viewer in ultra cinema mode")
+    parser.add_argument("--cinema", action="store_true",
+                        help="Auto-start the viewer in cinema mode (baked into the HTML)")
     parser.add_argument("--save-state", action="store_true",
                         help="Write campaign results to state/last_run.json")
     args = parser.parse_args()
@@ -299,12 +300,12 @@ def main():
     from visualize import _write_multi
     matches, campaign_meta = build_payload(results, spec, bot_path, repo_root)
     out_path = args.out if os.path.isabs(args.out) else os.path.join(repo_root, args.out)
-    abs_out = _write_multi(out_path, matches, campaign_meta=campaign_meta)
+    abs_out = _write_multi(out_path, matches, campaign_meta=campaign_meta,
+                            auto_cinema=args.cinema)
     print(f"Wrote {abs_out}")
 
     if not args.no_open:
-        anchor = "#ultra" if args.ultra else ("#cinema" if args.cinema else "")
-        webbrowser.open(f"file://{abs_out}" + anchor)
+        webbrowser.open(f"file://{abs_out}")
 
 
 if __name__ == "__main__":
