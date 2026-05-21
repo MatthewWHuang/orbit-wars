@@ -1793,10 +1793,19 @@ function spawnRing(state, x, y, color, maxRadius = 8, life = 30) {
   state.flashes.push({ x, y, age: 0, life, color, radius: 0, maxRadius });
 }
 
-function pushCaption(state, text, sub, color, life = 80) {
+function pushCaption(state, text, sub, color, life = 80, priority = 1) {
   // Only ever display one caption at a time -- new ones replace the previous
   // so simultaneous events don't stack into an unreadable wall of text.
-  state.captions = [{ text, sub, color, age: 0, life }];
+  // BUT: a low-priority caption (e.g. STREAK ×3) must not stomp an active
+  // high-priority one (FINAL BLOW / ELIMINATED / LAST STAND FAILS) that's
+  // still in its hold phase. Equal/higher priority always wins.
+  if (state.captions.length) {
+    const cur = state.captions[0];
+    const curPrio = cur.priority || 1;
+    const stillHolding = cur.age < cur.life - 20;
+    if (priority < curPrio && stillHolding) return;
+  }
+  state.captions = [{ text, sub, color, age: 0, life, priority }];
 }
 
 function triggerEventEffects(state, event) {
@@ -1859,7 +1868,7 @@ function triggerEventEffects(state, event) {
       spawnRing(state, event.x, event.y, toCol, 14, 80);
       spawnRing(state, event.x, event.y, '#ffd966', 28, 110);
       spawnRing(state, event.x, event.y, '#ffffff', 48, 150);
-      pushCaption(state, 'FINAL BLOW', `${winName} wins`, toCol, 280);
+      pushCaption(state, 'FINAL BLOW', `${winName} wins`, toCol, 280, 5);
       bumpShake(60);
       state.victoryFlash = { color: toCol, age: 0, life: 60 };
       break;
@@ -1874,7 +1883,7 @@ function triggerEventEffects(state, event) {
       spawnExplosion(state, event.x, event.y, '#ffffff', 30, 5.0);
       spawnRing(state, event.x, event.y, '#ff5a5a', 12, 80);
       spawnRing(state, event.x, event.y, '#ff9a5a', 22, 110);
-      pushCaption(state, 'INTO THE VOID', `${loserName} eliminated`, '#ff5a5a', 280);
+      pushCaption(state, 'INTO THE VOID', `${loserName} eliminated`, '#ff5a5a', 280, 5);
       bumpShake(55);
       // Brighten the border to max for the impact frame; fade out is
       // managed by edgeFlashTarget toggling later in the impact shot.
@@ -1963,7 +1972,7 @@ function triggerEventEffects(state, event) {
       spawnExplosion(state, event.x, event.y, '#ffffff', 25, 4.5);
       spawnRing(state, event.x, event.y, lostCol, 16, 80);
       spawnRing(state, event.x, event.y, '#cccccc', 26, 110);
-      pushCaption(state, 'ELIMINATED', sub, lostCol, 200);
+      pushCaption(state, 'ELIMINATED', sub, lostCol, 200, 4);
       bumpShake(40);
       // Brief grey screen flash -- the player's gone.
       state.victoryFlash = { color: '#888888', age: 0, life: 30 };
@@ -1988,7 +1997,7 @@ function triggerEventEffects(state, event) {
       const sub = event.gameEnder
         ? `${atkName} can't break the line`
         : `${atkName}'s final assault breaks against ${NAMES[event.targetOwner] || 'the defender'}`;
-      pushCaption(state, headline, sub, defCol, event.gameEnder ? 280 : 200);
+      pushCaption(state, headline, sub, defCol, event.gameEnder ? 280 : 200, event.gameEnder ? 5 : 3);
       bumpShake(event.gameEnder ? 55 : 32);
       if (event.gameEnder) {
         state.victoryFlash = { color: defCol, age: 0, life: 50 };
@@ -2177,7 +2186,7 @@ function processStepTransition(t) {
         const c = COLORS[s.player] || '#fff';
         pushCaption(cinemaState,
           `${s.count}-CAPTURE STREAK`,
-          NAMES[s.player] || '', c, 130);
+          NAMES[s.player] || '', c, 130, 1);
       }
     }
     // Biggest-fleet callouts -- attach to the actual fleet as a floating
@@ -2863,7 +2872,16 @@ function drawCinemaFrame() {
   if (cinemaState.captions.length) {
     const c = cinemaState.captions[0];
     {
-      const a = (c.age < 10) ? c.age / 10 : (c.age > c.life - 20 ? (c.life - c.age) / 20 : 1);
+      let a = (c.age < 10) ? c.age / 10 : (c.age > c.life - 20 ? (c.life - c.age) / 20 : 1);
+      // Fade caption while the camera is decompressing (zooming back out) so
+      // it doesn't linger on top of the wide view. Non-game-enders fade fully;
+      // game-ending FINAL BLOW / LAST STAND captions keep a residual presence
+      // (>=0.35) since the match is over and they're the headline.
+      if (shotCur && shotCur.kind === 'decompress') {
+        const t = Math.min(1, cinemaState.shotFrame / Math.max(1, shotCur.duration));
+        const floor = (c.priority || 1) >= 5 ? 0.35 : 0;
+        a *= floor + (1 - floor) * (1 - t);
+      }
       bctx.globalAlpha = a;
       // Cap title font so 4K monitors don't get a 200px headline.
       const titleFs = Math.min(72, Math.floor(W * 0.045));
