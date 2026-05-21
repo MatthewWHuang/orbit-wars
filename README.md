@@ -1,173 +1,167 @@
-# Orbit Wars
+# Orbit Wars Tooling
 
-Conquer planets rotating around a sun in continuous 2D space. A real-time strategy game for 2 or 4 players.
+Local infrastructure for developing, testing, and visualizing bots for the [Orbit Wars](ORBIT_WARS_README.md) Kaggle competition — a real-time strategy game where bots conquer planets orbiting a sun in 2D continuous space.
 
-## Overview
+This repo contains the **match runner, visualizer, tournament harness, single-file bundler, source-to-source optimizer, and campaign system**. It does **not** ship competitive bots — only a minimal example (`nearest_planet_sniper/`) so you can run something out of the box.
 
-Players start with a single home planet and compete to control the map by sending fleets to capture neutral and enemy planets. The board is a 100x100 continuous space with a sun at the center. Planets orbit the sun, comets fly through on elliptical trajectories, and fleets travel in straight lines. The game lasts 500 turns. The player with the most total ships (on planets + in fleets) at the end wins.
+For the full game rules, observation/action formats, and config knobs, see [ORBIT_WARS_README.md](ORBIT_WARS_README.md). For a step-by-step walkthrough of writing and submitting a bot to Kaggle, see [agents.md](agents.md).
 
-## Board Layout
+---
 
-- **Board**: 100x100 continuous space, origin at top-left.
-- **Sun**: Centered at (50, 50) with radius 10. Fleets that cross the sun are destroyed.
-- **Symmetry**: All planets and comets are placed with 4-fold mirror symmetry around the center: (x, y), (100-x, y), (x, 100-y), (100-x, 100-y). This ensures fairness regardless of starting position.
+## Quick Start
 
-## Planets
+```bash
+pip install "kaggle-environments>=1.28.0"
 
-Each planet is represented as `[id, owner, x, y, radius, ships, production]`.
+# Watch a match: example bot vs random, opens in your browser
+python basic_run.py nearest_planet_sniper random
 
-- **owner**: Player ID (0-3), or -1 for neutral.
-- **radius**: Determined by production: `1 + ln(production)`. Higher production planets are physically larger.
-- **production**: Integer from 1 to 5. Each turn, an owned planet generates this many ships.
-- **ships**: Current garrison. Starts between 5 and 99 (skewed toward lower values).
+# Two bots from a bots/ folder (see "Adding your own bots" below)
+python basic_run.py my_bot another_bot --seed 7
 
-### Planet Types
-
-- **Orbiting planets**: Planets whose `orbital_radius + planet_radius < 50` rotate around the sun at a constant angular velocity (0.025-0.05 radians/turn, randomized per game). Use `initial_planets` and `angular_velocity` from the observation to predict their positions.
-- **Static planets**: Planets further from the center do not rotate.
-
-The map contains 20-40 planets (5-10 symmetric groups of 4). At least 3 groups are guaranteed to be static, and at least one group is guaranteed to be orbiting.
-
-### Home Planets
-
-One symmetric group is randomly chosen as the starting planets. In a 2-player game, players start on diagonally opposite planets (Q1 and Q4). In a 4-player game, each player gets one planet from the group. Home planets start with 10 ships.
-
-## Fleets
-
-Each fleet is represented as `[id, owner, x, y, angle, from_planet_id, ships]`.
-
-- **angle**: Direction of travel in radians.
-- **ships**: Number of ships in the fleet (does not change during travel).
-
-### Fleet Speed
-
-Fleet speed scales with size on a logarithmic curve:
-
-```
-speed = 1.0 + (maxSpeed - 1.0) * (log(ships) / log(1000)) ^ 1.5
+# 4-player free-for-all
+python basic_run.py bot_a bot_b bot_c bot_d
 ```
 
-- 1 ship moves at 1.0 units/turn.
-- Larger fleets move faster, approaching the maximum speed (default 6.0).
-- A fleet of ~500 ships moves at ~5, and ~1000 ships reaches the max.
+Each match writes a self-contained HTML viewer to `render.html` and opens it. Append `--cinema` to open straight in cinema mode (full-screen, no controls).
 
-### Fleet Movement
+---
 
-Fleets travel in a straight line at their computed speed each turn. A fleet is removed if it:
+## What's in here
 
-- Goes out of bounds (leaves the 100x100 playing field).
-- Crosses the sun (path segment comes within the sun's radius).
-- Collides with any planet (path segment comes within the planet's radius). This triggers combat.
+| File / folder | Purpose |
+|---|---|
+| [basic_run.py](basic_run.py) | Run one match. Writes an HTML viewer and opens it. |
+| [tournament.py](tournament.py) | Run N matches of the same lineup in parallel, tabbed HTML viewer. |
+| [visualize.py](visualize.py) | Generate the self-contained HTML viewer from an `env.toJSON()` dump. |
+| [bundle.py](bundle.py) | Bundle a multi-file bot into a single `submission.py` for Kaggle. |
+| [optimize.py](optimize.py) | Source-to-source optimizer (function inlining + loop unrolling) for bundled submissions. |
+| [nearest_planet_sniper/](nearest_planet_sniper/) | Minimal example bot — sends ships to the nearest unowned planet when it can capture. |
+| [orbit-wars-campaign/](orbit-wars-campaign/) | Single-player campaign mode: walk a graph of territories, each a custom-configured match against an NPC. |
+| [bots/](bots/) | (Gitignored) Your private bots live here. The runner falls back to this dir for bot lookups. |
+| [ORBIT_WARS_README.md](ORBIT_WARS_README.md) | Full game rules and observation/action reference. |
+| [agents.md](agents.md) | Bot authoring guide + Kaggle submission walkthrough. |
 
-Collision detection is continuous -- the entire path segment from old to new position is checked, not just the endpoint.
+---
 
-### Fleet Launch
+## The runner — `basic_run.py`
 
-Each turn, your agent returns a list of moves: `[from_planet_id, direction_angle, num_ships]`.
+```
+python basic_run.py BOT [BOT ...] [--seed N] [--steps N] [--out PATH] [--no-render] [--cinema]
+```
 
-- You can only launch from planets you own.
-- You cannot launch more ships than the planet currently has.
-- The fleet spawns just outside the planet's radius in the given direction.
-- You can issue multiple launches from the same or different planets in a single turn.
+Accepts 1–4 bots. A bot arg can be:
 
-## Comets
+- `random` — built-in random-action bot
+- A path to a `.py` file — used directly as the agent
+- A bare name like `basic4` — resolved as `./basic4/main.py` first, then `./bots/basic4/main.py`
 
-Comets are temporary extra-solar objects that fly through the board on highly elliptical orbits around the sun. They spawn in groups of 4 (one per quadrant) at steps 50, 150, 250, 350, and 450.
+The runner handles two awkward parts of running multiple bots in one Python process:
 
-- **Radius**: 1.0 (fixed).
-- **Production**: 1 ship/turn when owned.
-- **Starting ships**: Random, skewed low (minimum of 4 rolls from 1-99). All 4 comets in a group share the same starting ship count.
-- **Speed**: Configurable via `cometSpeed` (default 4.0 units/turn).
-- **Identification**: Check `comet_planet_ids` in the observation to see which planet IDs are comets. Comets also appear in the `planets` array and follow all normal planet rules (capture, production, fleet launch, combat).
+- **Slow Kaggle imports.** `kaggle_environments` walks its `envs/` directory at import and eagerly loads every environment (open_spiel is especially slow). We monkey-patch `os.listdir` during import so only `orbit_wars` is discovered.
+- **Module name collisions.** If two bots both have a `physics.py`, the second one would clobber the first in `sys.modules`. The runner snapshots each bot's modules after load and swaps the right set back onto `sys.modules` (and onto `sys.path`) around each `act()` call, so each bot sees its own files.
 
-When a comet leaves the board, it is removed along with any ships garrisoned on it. Comets are removed before fleet launches each turn, so you cannot launch from a departing comet.
+Output: `render.html` (or `--out path`) — open it in any browser, no server needed. Includes playback controls, planet trails, per-player resource graphs, and any per-step JSON debug data your bot prints to stderr.
 
-The `comets` observation field contains comet group data including `paths` (the full trajectory for each comet) and `path_index` (current position along the path), which can be used to predict future comet positions.
+---
 
-## Turn Order
+## The visualizer — `visualize.py`
 
-Each turn executes in this order:
+`visualize.write_html(env, out_path, bot_names=...)` reduces `env.toJSON()` to the minimal per-step state (planets, fleets, comets, rewards, actions) and inlines it into a single HTML file with a vanilla-JS viewer. No build step, no external assets — works offline, easy to share, easy to embed.
 
-1. **Comet expiration**: Remove comets that have left the board.
-2. **Comet spawning**: Spawn new comet groups at designated steps.
-3. **Fleet launch**: Process all player actions, creating new fleets.
-4. **Production**: All owned planets (including comets) generate ships.
-5. **Fleet movement**: Move all fleets along their headings. Check for out-of-bounds, sun collision, and planet collision. Fleets that hit planets are queued for combat.
-6. **Planet rotation & comet movement**: Orbiting planets rotate, comets advance along their paths. Any fleet caught by a moving planet/comet is swept into combat with it.
-7. **Combat resolution**: Resolve all queued planet combats.
-
-## Combat
-
-When one or more fleets collide with a planet (either by flying into it or being swept by a moving planet), combat is resolved:
-
-1. All arriving fleets are grouped by owner. Ships from the same owner are summed.
-2. The largest attacking force fights the second largest. The difference in ships survives.
-3. If there is a surviving attacker:
-   - If the attacker is the same owner as the planet, the surviving ships are added to the garrison.
-   - If the attacker is a different owner, the surviving ships fight the garrison. If the attackers exceed the garrison, the planet changes ownership and the garrison becomes the surplus.
-4. If two attackers tie, all attacking ships are destroyed (no survivors).
-
-## Scoring and Termination
-
-The game ends when:
-
-- **Step limit reached**: 500 turns.
-- **Elimination**: Only one player (or zero) remains with any planets or fleets.
-
-Final score = total ships on owned planets + total ships in owned fleets. Highest score wins.
-
-## Observation Reference
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `planets` | `[[id, owner, x, y, radius, ships, production], ...]` | All planets including comets |
-| `fleets` | `[[id, owner, x, y, angle, from_planet_id, ships], ...]` | All active fleets |
-| `player` | `int` | Your player ID (0-3) |
-| `angular_velocity` | `float` | Planet rotation speed (radians/turn) |
-| `initial_planets` | `[[id, owner, x, y, radius, ships, production], ...]` | Planet positions at game start |
-| `comets` | `[{planet_ids, paths, path_index}, ...]` | Active comet group data |
-| `comet_planet_ids` | `[int, ...]` | Planet IDs that are comets |
-| `remainingOverageTime` | `float` | Remaining overage time budget (seconds) |
-
-## Action Format
-
-Return a list of moves:
+The viewer also parses any line from your agent's stderr that looks like JSON and surfaces it in a per-agent debug panel. Useful for inspecting your bot's internal state turn-by-turn:
 
 ```python
-[[from_planet_id, direction_angle, num_ships], ...]
-```
-
-- `from_planet_id`: ID of a planet you own.
-- `direction_angle`: Angle in radians (0 = right, pi/2 = down).
-- `num_ships`: Integer number of ships to send.
-
-Return an empty list `[]` to take no action.
-
-## Agent Convenience
-
-The module exports named tuples for easier field access:
-
-```python
-from kaggle_environments.envs.orbit_wars.orbit_wars import Planet, Fleet, CENTER, ROTATION_RADIUS_LIMIT
-
+import json, sys
 def agent(obs):
-    planets = [Planet(*p) for p in obs.get("planets", [])]
-    fleets = [Fleet(*f) for f in obs.get("fleets", [])]
-    player = obs.get("player", 0)
-
-    for p in planets:
-        print(p.id, p.owner, p.x, p.y, p.radius, p.ships, p.production)
-
-    return []  # list of [from_planet_id, angle, num_ships]
+    ...
+    print(json.dumps({"plan": "rush_top_left", "target": 5}), file=sys.stderr)
+    return moves
 ```
 
-## Configuration
+---
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `episodeSteps` | 500 | Maximum number of turns |
-| `actTimeout` | 1 | Seconds per turn |
-| `shipSpeed` | 6.0 | Maximum fleet speed |
-| `sunRadius` | 10.0 | Radius of the sun |
-| `boardSize` | 100.0 | Board dimensions |
-| `cometSpeed` | 4.0 | Comet speed (units/turn) |
+## The tournament harness — `tournament.py`
+
+```
+python tournament.py BOT BOT [BOT BOT] --matches N [--workers W] [--steps N]
+```
+
+Runs N matches of the same lineup in parallel worker processes (default workers = `cpu_count() // 2`), each with a different seed. Produces a tabbed HTML viewer where you can flip between matches and see aggregate win rates.
+
+Same bot-resolution rules as `basic_run.py`.
+
+---
+
+## Bundling for Kaggle — `bundle.py`
+
+Kaggle's submission format wants a single `main.py`. If your bot is split across files (`main.py`, `physics.py`, `planning.py`, ...), `bundle.py` embeds the helper modules as strings and registers them in `sys.modules` at import time, so `from physics import fleet_speed` keeps working unchanged inside the bundle.
+
+```bash
+python bundle.py my_bot                       # writes my_bot/submission.py
+python bundle.py my_bot -o out.py
+python bundle.py my_bot --submit -m "v3"      # bundle + kaggle competitions submit
+```
+
+---
+
+## Optimizing bundled submissions — `optimize.py`
+
+Runs two source-to-source passes on a bundled `submission.py`, alternating to a fixpoint:
+
+1. **Inlining.** Single-`return` functions (and linear "assignments + final return" bodies, with early-return guards turned into ternaries) get expanded at call sites. Cross-module inlining is allowed when the body uses only safe names (parameters, `math.*`, builtins, module-level literal constants).
+2. **Unrolling.** `for x in range(...)` and `for x in <literal-seq>` loops whose bounds resolve to concrete integers are expanded. `# @unroll N` for partial unrolling, `# @nounroll` to skip a loop, `# @noinline` to skip a function.
+
+```bash
+python optimize.py my_bot/submission.py
+python optimize.py my_bot/submission.py -o my_bot/submission_opt.py --verbose
+```
+
+Useful when Kaggle's per-turn timeout is tight and you want to remove function-call and loop overhead without hand-rewriting.
+
+---
+
+## Campaign mode — `orbit-wars-campaign/`
+
+A single-player progression mode. You point it at one bot and it walks a graph of territories defined in [territories.json](orbit-wars-campaign/territories.json):
+
+```bash
+cd orbit-wars-campaign
+python campaign.py --bot ../bots/my_bot/main.py
+```
+
+Each territory is a match with its own seed and engine config (`boardSize`, `episodeSteps`, `sunRadius`, `cometSpeed`, ...) against an NPC opponent picked from [orbit-wars-campaign/npc/](orbit-wars-campaign/npc/) (`sniper`, `swarmer`, `turtle`). The run ends on your first loss or when you beat the boss. Output is a `campaign.html` viewer with the graph, lore, and embedded per-match playback.
+
+Useful for stress-testing a bot across varied configurations rather than always running the default 100×100 / 500-step board.
+
+---
+
+## Adding your own bots
+
+The default layout is:
+
+```
+bots/                # gitignored in this repo; init it as your own private repo
+  my_bot/
+    main.py          # def agent(observation, configuration) -> [[from_id, angle, ships], ...]
+    physics.py       # any helper modules you want
+    planning.py
+```
+
+A bot is just a directory containing `main.py` with an `agent` function. See [nearest_planet_sniper/main.py](nearest_planet_sniper/main.py) for the smallest possible example, and [agents.md](agents.md) for a full authoring walkthrough.
+
+Once your bot is in `bots/my_bot/`, you can run it by bare name:
+
+```bash
+python basic_run.py my_bot random
+python tournament.py my_bot another_bot --matches 16
+python bundle.py bots/my_bot --submit -m "first try"
+```
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE) if/when added.
+
+Orbit Wars itself is a competition environment shipped in [kaggle-environments](https://github.com/Kaggle/kaggle-environments). This repo is independent tooling around it.
