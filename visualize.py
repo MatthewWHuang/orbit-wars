@@ -574,12 +574,7 @@ function drawBoard() {
   bctx.setTransform(1, 0, 0, 1, 0, 0);
   bctx.fillStyle = '#070b1a';
   bctx.fillRect(0, 0, W, H);
-  // Camera shake offset (decays over time; see draw()).
-  if (regularShake > 0) {
-    const sx = (Math.random() - 0.5) * regularShake;
-    const sy = (Math.random() - 0.5) * regularShake;
-    bctx.setTransform(1, 0, 0, 1, sx, sy);
-  }
+  // (Non-cinema shake removed -- reserve the effect for cinema mode.)
 
   // Sun
   bctx.beginPath();
@@ -962,39 +957,8 @@ function draw() {
     matchFinished[currentMatchIdx] = true;
     updateTabResults();
   }
-  // Detect shake-worthy events between the last drawn step and the new step.
-  if (cur > lastShakeStep) {
-    for (let t = Math.max(1, lastShakeStep + 1); t <= cur; t++) {
-      const prev = frames[t-1], curF = frames[t];
-      if (!prev || !curF) continue;
-      // Player-on-player planet flip -> shake
-      const prevOwners = {};
-      for (const p of prev.planets) prevOwners[p[0]] = p[1];
-      for (const p of curF.planets) {
-        const before = prevOwners[p[0]];
-        if (before === undefined) continue;
-        if (before !== p[1] && before >= 0 && p[1] >= 0) {
-          regularShake = Math.max(regularShake, 7);
-        }
-      }
-      // Comet sweep / fleet impact -> small shake
-      const curFleetIds = new Set(curF.fleets.map(f => f[0]));
-      for (const f of prev.fleets) {
-        if (curFleetIds.has(f[0])) continue;
-        regularShake = Math.max(regularShake, 3);
-      }
-    }
-    lastShakeStep = cur;
-  }
-  // Ensure shake decays even when no user input -- schedule a follow-up draw.
-  if (regularShake > 0 && !regularShakeRAF) {
-    regularShakeRAF = requestAnimationFrame(() => {
-      regularShakeRAF = null;
-      regularShake *= 0.82;
-      if (regularShake < 0.4) regularShake = 0;
-      draw();
-    });
-  }
+  // (Non-cinema shake detection removed -- effect kept exclusive to cinema.)
+  lastShakeStep = cur;
   refreshSelectedPrediction();
   drawBoard();
   drawGraphs();
@@ -1148,14 +1112,24 @@ function detectEvents(frames, series, N_AGENTS, NAMES) {
         const loserHasPlanetsAtEnd =
           finalPlanets.some(pp => pp[1] === before.owner);
         const isGameEnder = !loserHasPlanetsAtEnd && t >= frames.length - 6;
+        // 4p player-elimination: loser has no fleets and no planets *now* but
+        // the game keeps going (other players still alive at end).
+        const loserGoneNow = before.owner >= 0 &&
+          !cur.fleets.some(fl => fl[1] === before.owner) &&
+          !cur.planets.some(pp => pp[1] === before.owner);
+        const is4pElim = !isGameEnder && N_AGENTS >= 3 && loserGoneNow;
+        let evType, evImp;
+        if (isGameEnder)  { evType = 'final_capture';     evImp = 999; }
+        else if (is4pElim){ evType = 'player_eliminated'; evImp = 600; }
+        else              { evType = 'flip';
+                            evImp = 60 + p[6] * 15 + Math.min(impactShips, 50); }
         events.push({
-          t, type: isGameEnder ? 'final_capture' : 'flip',
+          t, type: evType,
           pid, x: p[2], y: p[3], r: p[4],
           fromOwner: before.owner, toOwner: o, prod: p[6],
           ships: p[5],
-          importance: isGameEnder
-            ? 999
-            : 60 + p[6] * 15 + Math.min(impactShips, 50),
+          eliminationMode: is4pElim ? 'captured' : null,
+          importance: evImp,
         });
       }
     }
@@ -1180,9 +1154,9 @@ function detectEvents(frames, series, N_AGENTS, NAMES) {
       const hitSun = Math.hypot(f[2] - 50, f[3] - 50) < 14;
       const targetIsComet = near && (cur.comet_planet_ids || []).includes(near[0]);
 
-      // Game-ending edge-out: the owner of this fleet has nothing left after
-      // it dies, the fleet's projected position is off the board, and the
-      // game ends within a few ticks (so it's actually a final action).
+      // OOB elimination -- fleet's owner has nothing left after this step
+      // and its projected next position is off the board. 2p endgame fires
+      // 'edge_out'; 4p mid-game elim fires 'player_eliminated' (mode='oob').
       if (wentOOB) {
         const owner = f[1];
         const ownerGoneNow = owner >= 0 &&
@@ -1191,7 +1165,7 @@ function detectEvents(frames, series, N_AGENTS, NAMES) {
         const ownerGoneAtEnd = owner >= 0 &&
           !finalFrame.fleets.some(fl => fl[1] === owner) &&
           !finalFrame.planets.some(p => p[1] === owner);
-        if (ownerGoneNow && ownerGoneAtEnd && t >= frames.length - 6) {
+        if (ownerGoneNow && ownerGoneAtEnd) {
           // Solve fleet line vs the [0,100]^2 boundary -- where does it cross?
           let aCross = 1.0;
           if (vx > 1e-6) aCross = Math.min(aCross, (100 - f[2]) / vx);
@@ -1201,23 +1175,77 @@ function detectEvents(frames, series, N_AGENTS, NAMES) {
           aCross = Math.max(0, Math.min(1, aCross));
           const exitX = f[2] + vx * aCross;
           const exitY = f[3] + vy * aCross;
-          events.push({
-            t, type: 'edge_out',
-            x: exitX, y: exitY,
-            fleetX: f[2], fleetY: f[3],
-            angle: f[4], ships: f[6], owner,
-            importance: 999,
-          });
-          continue;
+          // Game-ender if it's last-few ticks of the match.
+          const isGameEnder2p = N_AGENTS === 2 && t >= frames.length - 6;
+          if (isGameEnder2p) {
+            events.push({
+              t, type: 'edge_out',
+              x: exitX, y: exitY,
+              fleetX: f[2], fleetY: f[3],
+              angle: f[4], ships: f[6], owner,
+              importance: 999,
+            });
+            continue;
+          } else if (N_AGENTS >= 3) {
+            events.push({
+              t, type: 'player_eliminated',
+              x: exitX, y: exitY,
+              fleetX: f[2], fleetY: f[3],
+              angle: f[4], ships: f[6], owner,
+              eliminationMode: 'oob',
+              importance: 600,
+            });
+            continue;
+          }
         }
       }
 
+      // Failed assault: fleet hit an enemy planet, didn't capture it, AND
+      // the fleet's owner has nothing left afterward. Either game-ending (2p
+      // last assault) or 4p player elimination. Override the normal impact
+      // classification so we can show the "REPELLED" treatment.
+      if (!wentOOB && !hitSun && !targetIsComet && near) {
+        const owner = f[1];
+        const prevNear = prev.planets.find(pp => pp[0] === near[0]);
+        // Hostile target both before and after this step (didn't flip).
+        if (owner >= 0 && prevNear && prevNear[1] !== owner && near[1] !== owner) {
+          const ownerGoneNow =
+            !cur.fleets.some(fl => fl[1] === owner) &&
+            !cur.planets.some(p => p[1] === owner);
+          const ownerGoneAtEnd =
+            !finalFrame.fleets.some(fl => fl[1] === owner) &&
+            !finalFrame.planets.some(p => p[1] === owner);
+          if (ownerGoneNow && ownerGoneAtEnd) {
+            // Game-ender (2p) if only one other player remains alive at end.
+            let activeAtEnd = 0;
+            for (let pid = 0; pid < N_AGENTS; pid++) {
+              if (finalFrame.fleets.some(fl => fl[1] === pid) ||
+                  finalFrame.planets.some(p => p[1] === pid)) activeAtEnd++;
+            }
+            const isGameEnder = activeAtEnd <= 1;
+            events.push({
+              t, type: 'failed_assault',
+              x: f[2], y: f[3],
+              targetX: near[2], targetY: near[3], targetPid: near[0],
+              owner, ships: f[6], targetOwner: near[1],
+              gameEnder: isGameEnder,
+              importance: 999,
+            });
+            continue;
+          }
+        }
+      }
+
+      const isClutch = !hitSun && !targetIsComet && f[6] >= 30;
       events.push({
         t, type: hitSun ? 'sun_death' : (targetIsComet ? 'comet_sweep' : 'impact'),
         x: f[2], y: f[3],
         targetX: near ? near[2] : f[2], targetY: near ? near[3] : f[3],
         owner: f[1], ships: f[6], targetPid: near ? near[0] : null,
-        importance: hitSun ? 25 : (targetIsComet ? 70 : 15 + Math.min(f[6], 80)),
+        clutch: isClutch,
+        importance: hitSun ? 25
+                   : (targetIsComet ? 70
+                   : (isClutch ? 90 + Math.min(f[6], 100) : 15 + Math.min(f[6], 80))),
       });
     }
     // 3) Comet spawns: comet_planet_ids new ids vs previous
@@ -1240,16 +1268,36 @@ function detectEvents(frames, series, N_AGENTS, NAMES) {
         importance: 25 + Math.min(f[6], 200) / 2,
       });
     }
-    // 5) Lead change: total ships between players
+    // 5) Lead change: total ships between players. Promote to 'comeback' when
+    // the new leader was trailing by a wide margin (>= 25 ships) somewhere in
+    // the last ~80 steps -- that's a real reversal, not a hand-over-hand swap.
     if (N_AGENTS >= 2 && t >= 5) {
       const prevDiff = series.ships[0][t-1] - series.ships[1][t-1];
       const curDiff = series.ships[0][t] - series.ships[1][t];
       if (Math.sign(prevDiff) !== Math.sign(curDiff) && Math.abs(prevDiff) + Math.abs(curDiff) > 0) {
-        events.push({
-          t, type: 'lead_change', x: 50, y: 50,
-          fromPlayer: prevDiff > 0 ? 0 : 1, toPlayer: curDiff > 0 ? 0 : 1,
-          importance: 80,
-        });
+        const newLeader = curDiff > 0 ? 0 : 1;
+        let deficit = 0;
+        if (t >= 30) {
+          const lookback = Math.min(80, t - 5);
+          for (let s = t - 5; s >= t - lookback; s--) {
+            const d = series.ships[0][s] - series.ships[1][s];
+            const trailedBy = newLeader === 1 ? d : -d;
+            if (trailedBy > deficit) deficit = trailedBy;
+          }
+        }
+        if (deficit >= 25) {
+          events.push({
+            t, type: 'comeback', x: 50, y: 50,
+            toPlayer: newLeader, deficit,
+            importance: 200,
+          });
+        } else {
+          events.push({
+            t, type: 'lead_change', x: 50, y: 50,
+            fromPlayer: prevDiff > 0 ? 0 : 1, toPlayer: newLeader,
+            importance: 80,
+          });
+        }
       }
     }
   }
@@ -1282,91 +1330,258 @@ function selectEvents(rawEvents, totalSteps) {
   return kept;
 }
 
+// Cluster selected events whose ticks are within K of each other into groups
+// (size 2-4 will become split-screen multi-shots). Returns array of arrays.
+function clusterEvents(selected, K = 5) {
+  const clusters = [];
+  let cur = [];
+  for (const e of selected) {
+    if (cur.length === 0 || e.t - cur[cur.length - 1].t <= K) cur.push(e);
+    else { clusters.push(cur); cur = [e]; }
+  }
+  if (cur.length > 0) clusters.push(cur);
+  return clusters;
+}
+
+// Positional pane layout. Returns array of {event, fracX, fracY, fracW, fracH,
+// target:{cx,cy,zoom}}. fracs are 0..1 of viewport.
+function computePaneLayoutFracs(events) {
+  const n = events.length;
+  const eventZoom = e => {
+    if (e.type === 'final_capture') return 2.2;
+    if (e.type === 'edge_out' || (e.type === 'player_eliminated' && e.eliminationMode === 'oob')) return 1.0;
+    if (e.type === 'failed_assault') return 2.0;
+    if (e.type === 'player_eliminated') return 1.9;
+    if (e.type === 'lead_change' || e.type === 'comeback') return 1.0;
+    if (e.type === 'comet_spawn') return 1.6;
+    if (e.type === 'comet_sweep') return 2.2;
+    if (e.type === 'big_fleet') return 1.7;
+    if (e.clutch) return 2.4;
+    return 1.8;
+  };
+  const makePane = (event, fx, fy, fw, fh) => ({
+    event, fracX: fx, fracY: fy, fracW: fw, fracH: fh,
+    target: { cx: event.x, cy: event.y, zoom: eventZoom(event) },
+  });
+  if (n === 2) {
+    const dx = Math.abs(events[0].x - events[1].x);
+    const dy = Math.abs(events[0].y - events[1].y);
+    if (dx >= dy) {
+      const s = events.slice().sort((a, b) => a.x - b.x);
+      return [makePane(s[0], 0, 0, 0.5, 1), makePane(s[1], 0.5, 0, 0.5, 1)];
+    } else {
+      const s = events.slice().sort((a, b) => a.y - b.y);
+      return [makePane(s[0], 0, 0, 1, 0.5), makePane(s[1], 0, 0.5, 1, 0.5)];
+    }
+  }
+  if (n === 3) {
+    const s = events.slice().sort((a, b) => a.x - b.x);
+    return [
+      makePane(s[0], 0,     0, 1/3, 1),
+      makePane(s[1], 1/3,   0, 1/3, 1),
+      makePane(s[2], 2/3,   0, 1/3, 1),
+    ];
+  }
+  // n >= 4 — use top 4 by importance, assigned to quadrants by their position.
+  const top4 = events.slice().sort((a, b) => b.importance - a.importance).slice(0, 4);
+  const quads = {
+    TL: { fx: 0,   fy: 0,   fw: 0.5, fh: 0.5 },
+    TR: { fx: 0.5, fy: 0,   fw: 0.5, fh: 0.5 },
+    BL: { fx: 0,   fy: 0.5, fw: 0.5, fh: 0.5 },
+    BR: { fx: 0.5, fy: 0.5, fw: 0.5, fh: 0.5 },
+  };
+  const used = new Set();
+  const out = [];
+  for (const e of top4) {
+    const want = (e.y < 50 ? 'T' : 'B') + (e.x < 50 ? 'L' : 'R');
+    // Try the natural quadrant, then horizontal mirror, then vertical, then opposite.
+    const fallbacks = [
+      want,
+      want[0] + (want[1] === 'L' ? 'R' : 'L'),
+      (want[0] === 'T' ? 'B' : 'T') + want[1],
+      (want[0] === 'T' ? 'B' : 'T') + (want[1] === 'L' ? 'R' : 'L'),
+    ];
+    let pickKey = want;
+    for (const k of fallbacks) {
+      if (!used.has(k)) { pickKey = k; break; }
+    }
+    used.add(pickKey);
+    const q = quads[pickKey];
+    out.push(makePane(e, q.fx, q.fy, q.fw, q.fh));
+  }
+  // Sort by reading order (top-to-bottom, left-to-right) so iteration is stable.
+  out.sort((a, b) => a.fracY - b.fracY || a.fracX - b.fracX);
+  return out;
+}
+
+// Resolve fractional panes into absolute pixel rects + ensure each has a cam.
+function materializePanes(shot, W, H, WIDE_ZOOM) {
+  return shot.panes.map((p, i) => {
+    if (!shot._cams) shot._cams = shot.panes.map(() => ({
+      cx: 50, cy: 50, zoom: WIDE_ZOOM,
+      tcx: 50, tcy: 50, tzoom: WIDE_ZOOM,
+    }));
+    const c = shot._cams[i];
+    // Targets re-applied every call so split-in / split-out can update them.
+    c.tcx = p._curTarget ? p._curTarget.cx : p.target.cx;
+    c.tcy = p._curTarget ? p._curTarget.cy : p.target.cy;
+    c.tzoom = p._curTarget ? p._curTarget.zoom : p.target.zoom;
+    return {
+      x: Math.floor(p.fracX * W), y: Math.floor(p.fracY * H),
+      w: Math.ceil(p.fracW * W),  h: Math.ceil(p.fracH * H),
+      cam: c, event: p.event, paneIdx: i,
+    };
+  });
+}
+
 // Build a list of "shots" for the cinema reel.
 function buildShots(selected, totalSteps) {
   const shots = [];
   const WIDE_ZOOM = 0.78;
   shots.push({ kind: 'title', startStep: 0, duration: 110, target: { cx: 50, cy: 50, zoom: WIDE_ZOOM } });
-  // Guaranteed slow opening: play the first chunk of game time at a ramping rate
-  // BEFORE any fast-forward fill can kick in. This gives the viewer time to read
-  // the board on a long match where the first selected event may be far away.
+  // Ambient pace ramps from ~2x normal playback in the early game to ~4-5x in
+  // the late game. Normal game playback is ~5 steps/sec (~0.083 steps/frame at
+  // 60fps), so we go from ~0.16 -> ~0.40 steps/frame across the match.
+  const RATE_EARLY = 0.16;
+  const RATE_LATE = 0.40;
+  const ambientRateAt = (step) => {
+    const denom = Math.max(1, totalSteps - 1);
+    const p = Math.max(0, Math.min(1, step / denom));
+    return RATE_EARLY + (RATE_LATE - RATE_EARLY) * p;
+  };
   const firstEventStep = selected.length > 0 ? selected[0].t : totalSteps - 1;
   const openingEnd = Math.min(60, Math.max(15, firstEventStep - 4));
   shots.push({
     kind: 'ambient', fromStep: 0, toStep: openingEnd,
-    stepsPerFrameStart: 0.025, stepsPerFrameEnd: 0.18,
-    rampSteps: Math.max(25, openingEnd * 0.8),
+    stepsPerFrameStart: ambientRateAt(0), stepsPerFrameEnd: ambientRateAt(openingEnd),
+    rampSteps: openingEnd,
     target: { cx: 50, cy: 50, zoom: WIDE_ZOOM },
   });
   let lastEnd = openingEnd;
-  for (let i = 0; i < selected.length; i++) {
-    const e = selected[i];
-    const gap = e.t - lastEnd;
+  // Walk selected events as clusters (events within 5 ticks merge into a
+  // single split-screen multi-shot).
+  const clusters = clusterEvents(selected, 5);
+  for (const cluster of clusters) {
+    const firstT = cluster[0].t;
+    const lastT = cluster[cluster.length - 1].t;
+    const gap = firstT - lastEnd;
     // Fast-forward fill: only if there's a big gap to skip.
     if (gap > 25) {
       shots.push({
-        kind: 'fill', fromStep: lastEnd, toStep: Math.max(lastEnd + 1, e.t - 10),
+        kind: 'fill', fromStep: lastEnd, toStep: Math.max(lastEnd + 1, firstT - 10),
         target: { cx: 50, cy: 50, zoom: WIDE_ZOOM },
       });
-      lastEnd = Math.max(lastEnd + 1, e.t - 10);
+      lastEnd = Math.max(lastEnd + 1, firstT - 10);
     }
     // Ambient establishing shot: play normal-paced gameplay at wide view for a beat,
     // so the eye resets before zooming in.
     const ambientFromStep = lastEnd;
-    const ambientToStep = Math.max(ambientFromStep + 1, e.t - 4);
+    const ambientToStep = Math.max(ambientFromStep + 1, firstT - 4);
     if (ambientToStep > ambientFromStep) {
       shots.push({
         kind: 'ambient', fromStep: ambientFromStep, toStep: ambientToStep,
-        stepsPerFrameStart: 0.18, stepsPerFrameEnd: 0.18, rampSteps: 0,
+        stepsPerFrameStart: ambientRateAt(ambientFromStep),
+        stepsPerFrameEnd: ambientRateAt(ambientToStep),
+        rampSteps: ambientToStep - ambientFromStep,
         target: { cx: 50, cy: 50, zoom: WIDE_ZOOM },
       });
       lastEnd = ambientToStep;
     }
+
+    // ---- Multi-event cluster -> split-screen shot ----
+    if (cluster.length >= 2) {
+      // Up to 4 panes; pick top-N by importance, sort by t for trigger order.
+      const useEvents = cluster.length > 4
+        ? cluster.slice().sort((a, b) => b.importance - a.importance).slice(0, 4)
+        : cluster.slice();
+      useEvents.sort((a, b) => a.t - b.t);
+      const minT = useEvents[0].t, maxT = useEvents[useEvents.length - 1].t;
+      const panes = computePaneLayoutFracs(useEvents);
+      const types = new Set(useEvents.map(e => e.type));
+      const allSameType = types.size === 1;
+      shots.push({
+        kind: 'multi', events: useEvents, panes,
+        allSameType,
+        fromStep: Math.max(lastEnd + 1, minT - 2),
+        toStep: maxT,
+        splitInFrames: 10,
+        slowmoStepsPerFrame: 0.07,
+        holdFrames: 65,
+        splitOutFrames: 10,
+        target: { cx: 50, cy: 50, zoom: WIDE_ZOOM },
+      });
+      shots.push({
+        kind: 'decompress', duration: 12,
+        target: { cx: 50, cy: 50, zoom: WIDE_ZOOM },
+      });
+      lastEnd = maxT;
+      continue;
+    }
+
+    // ---- Single-event cluster -> classic approach/slowmo/impact ----
+    const e = cluster[0];
     // Approach: pan to event with zoom; longer so the camera glide is visible.
     const isFinal = e.type === 'final_capture';
     const isEdgeOut = e.type === 'edge_out';
-    // Frame edge-outs wide so the boundary is visible; aim camera at the
-    // midpoint between the fleet's current position and its exit point.
-    const focusX = isEdgeOut ? (e.fleetX + e.x) * 0.5 : e.x;
-    const focusY = isEdgeOut ? (e.fleetY + e.y) * 0.5 : e.y;
+    const isPlayerElim = e.type === 'player_eliminated';
+    const isFailedAssault = e.type === 'failed_assault';
+    const isElimOOB = isPlayerElim && e.eliminationMode === 'oob';
+    // For OOB-style elims, frame wide and aim at the midpoint of fleet→exit
+    // so the boundary is visible (same trick edge_out uses).
+    const wideOOB = isEdgeOut || isElimOOB;
+    const focusX = wideOOB ? (e.fleetX + e.x) * 0.5
+                 : isFailedAssault ? ((e.targetX ?? e.x) + e.x) * 0.5
+                 : e.x;
+    const focusY = wideOOB ? (e.fleetY + e.y) * 0.5
+                 : isFailedAssault ? ((e.targetY ?? e.y) + e.y) * 0.5
+                 : e.y;
     const focusZoom =
-      isEdgeOut                ? 0.85 :
-      isFinal                  ? 2.4 :
-      e.type === 'lead_change' ? 1.1 :
-      e.type === 'comet_spawn' ? 1.7 :
-      e.type === 'big_fleet'   ? 1.8 :
-      e.type === 'comet_sweep' ? 2.3 :
+      wideOOB                       ? 0.85 :
+      isFinal                       ? 2.4 :
+      isFailedAssault && e.gameEnder ? 2.3 :
+      isFailedAssault               ? 2.0 :
+      isPlayerElim                  ? 1.9 :
+      e.type === 'lead_change'      ? 1.1 :
+      e.type === 'comeback'         ? 1.0 :
+      e.type === 'comet_spawn'      ? 1.7 :
+      e.type === 'big_fleet'        ? 1.8 :
+      e.type === 'comet_sweep'      ? 2.3 :
+      e.clutch                      ? 2.6 :
       2.0;
+    const isHeavyEvent = isFinal || isEdgeOut ||
+                         (isFailedAssault && e.gameEnder) || isPlayerElim;
     shots.push({
       kind: 'approach', event: e,
       atStep: Math.max(lastEnd + 1, e.t - 3),
       target: { cx: focusX, cy: focusY, zoom: focusZoom },
-      duration: (isFinal || isEdgeOut) ? 90 : 55,
+      duration: isHeavyEvent ? 30 : 18,
     });
     shots.push({
       kind: 'slowmo', event: e,
       fromStep: Math.max(lastEnd + 1, e.t - 2), toStep: e.t,
-      stepsPerFrame: (isFinal || isEdgeOut) ? 0.015 : 0.04,
+      stepsPerFrame: isHeavyEvent ? 0.05 : 0.14,
       target: { cx: focusX, cy: focusY, zoom: focusZoom },
     });
     shots.push({
       kind: 'impact', event: e,
       atStep: e.t,
-      holdFrames: (isFinal || isEdgeOut) ? 280 : 110,
+      holdFrames: isHeavyEvent ? 75 : 35,
       target: { cx: focusX, cy: focusY, zoom: focusZoom * (isFinal ? 1.15 : 1.0) },
     });
     // Decompress: pull back to wide before next event
     shots.push({
-      kind: 'decompress', duration: 35,
+      kind: 'decompress', duration: 11,
       target: { cx: 50, cy: 50, zoom: WIDE_ZOOM },
     });
     lastEnd = e.t;
   }
-  // Tail: real-time play-out of the rest (not fast)
+  // Tail: real-time play-out of the rest at the late-game ramped pace.
   if (lastEnd < totalSteps - 1) {
     shots.push({
       kind: 'ambient', fromStep: lastEnd, toStep: totalSteps - 1,
-      stepsPerFrameStart: 0.2, stepsPerFrameEnd: 0.2, rampSteps: 0,
+      stepsPerFrameStart: ambientRateAt(lastEnd),
+      stepsPerFrameEnd: ambientRateAt(totalSteps - 1),
+      rampSteps: totalSteps - 1 - lastEnd,
       target: { cx: 50, cy: 50, zoom: WIDE_ZOOM },
     });
   }
@@ -1435,8 +1650,11 @@ function buildUltraData() {
       }
     }
   }
-  // Walk flips, find runs of same player within 40 ticks.
+  // Walk flips, find runs of same player within 40 ticks. We also record the
+  // running count per individual flip so the cinema can show a small "STREAK
+  // ×N" tag on every capture in a run -- not just the 3/5/7 big-caption beats.
   const streakEvents = [];
+  const flipRunCount = {};  // `${t}:${pid}` -> count within current run (1+)
   let runPlayer = -1, runStart = 0, runCount = 0, runLastT = -100;
   for (const fl of flips) {
     if (fl.player === runPlayer && fl.t - runLastT <= 40) {
@@ -1448,6 +1666,7 @@ function buildUltraData() {
     } else {
       runPlayer = fl.player; runStart = fl.t; runCount = 1; runLastT = fl.t;
     }
+    flipRunCount[`${fl.t}:${fl.pid}`] = runCount;
   }
   // Comet paths: pid -> path array (for trajectory preview)
   const cometPaths = {};
@@ -1459,7 +1678,7 @@ function buildUltraData() {
     }
   }
   return {
-    contestedWindows, biggestByStep, streakEvents, cometPaths,
+    contestedWindows, biggestByStep, streakEvents, cometPaths, flipRunCount,
     triggeredStreaks: new Set(),
     triggeredBiggest: 0,
   };
@@ -1490,6 +1709,11 @@ function buildCinema() {
     ultra: buildUltraData(),
     fleetTrails: new Map(),   // fleet_id -> [{x,y,owner}, ...] last positions
     damageNumbers: [],        // floating numbers from planet ship-count changes
+    streakTag: null,          // single running STREAK ×N tag that hops to the
+                              // latest capture; count == current run length so
+                              // it always matches the 3/5/7 big caption.
+    barrierFlashes: [],       // localized force-field hits where fleets leave
+                              // the [0,100]^2 map: {x, y, edge, age, life}
     lastSeenStepBoundary: -1, // for one-shot per-step transitions
     edgeFlashAlpha: 0,        // current opacity of the red map-edge border
     edgeFlashTarget: 0,       // target opacity (lerped toward in drawCinemaFrame)
@@ -1514,7 +1738,11 @@ function smoothCamera(cam) {
   // Slightly elastic camera movement.
   cam.cx += (cam.tcx - cam.cx) * 0.06;
   cam.cy += (cam.tcy - cam.cy) * 0.06;
-  cam.zoom += (cam.tzoom - cam.zoom) * 0.05;
+  // Zoom-punch: when punchTtl > 0, use a much faster lerp so the snap-in
+  // bumped zoom settles back over ~10-15 frames instead of glacial 0.05.
+  const zoomLerp = (cam.punchTtl && cam.punchTtl > 0) ? 0.18 : 0.05;
+  cam.zoom += (cam.tzoom - cam.zoom) * zoomLerp;
+  if (cam.punchTtl) cam.punchTtl--;
 }
 
 function getInterpolatedPlanet(p, pPrev, alpha, av) {
@@ -1596,6 +1824,14 @@ function triggerEventEffects(state, event) {
     if (event.owner >= 0) state.fleetsSentByPlayer[event.owner]++;
   } else if (event.type === 'lead_change') {
     logText = `Lead: ${NAMES[event.toPlayer]}`; logColor = COLORS[event.toPlayer];
+  } else if (event.type === 'comeback') {
+    logText = `Comeback: ${NAMES[event.toPlayer]}`; logColor = COLORS[event.toPlayer];
+  } else if (event.type === 'player_eliminated') {
+    logText = `${NAMES[event.owner] ?? '?'} eliminated`;
+    logColor = event.owner >= 0 ? COLORS[event.owner] : '#888';
+  } else if (event.type === 'failed_assault') {
+    logText = `${NAMES[event.owner] ?? '?'} repelled`;
+    logColor = event.owner >= 0 ? COLORS[event.owner] : '#888';
   }
   if (logText) {
     state.eventLog.unshift({ t: event.t, text: logText, color: logColor, age: 0 });
@@ -1650,9 +1886,21 @@ function triggerEventEffects(state, event) {
     }
     case 'impact': {
       const c = event.owner >= 0 ? COLORS[event.owner] : '#fff';
-      spawnExplosion(state, event.x, event.y, c, 30, 2.0);
-      spawnRing(state, event.x, event.y, c, 6, 30);
-      bumpShake(10);
+      if (event.clutch) {
+        // Hero play: single fleet of 30+ ships connects. Larger burst,
+        // dual-color ring, and a "CLUTCH HIT" caption.
+        spawnExplosion(state, event.x, event.y, c, 90, 3.6);
+        spawnExplosion(state, event.x, event.y, '#ffd966', 35, 2.4);
+        spawnRing(state, event.x, event.y, c, 12, 60);
+        spawnRing(state, event.x, event.y, '#ffd966', 18, 75);
+        pushCaption(state, 'CLUTCH HIT',
+          `${NAMES[event.owner] || 'fleet'} · ${event.ships} ships`, c, 140);
+        bumpShake(28);
+      } else {
+        spawnExplosion(state, event.x, event.y, c, 30, 2.0);
+        spawnRing(state, event.x, event.y, c, 6, 30);
+        bumpShake(10);
+      }
       break;
     }
     case 'sun_death': {
@@ -1687,6 +1935,64 @@ function triggerEventEffects(state, event) {
       pushCaption(state, 'LEAD CHANGE', `${NAMES[event.toPlayer]} takes over`, c, 150);
       spawnRing(state, 50, 50, c, 22, 60);
       bumpShake(18);
+      break;
+    }
+    case 'comeback': {
+      const c = COLORS[event.toPlayer];
+      pushCaption(state, 'COMEBACK',
+        `${NAMES[event.toPlayer]} claws back from -${event.deficit}`, c, 200);
+      // Triple-ring out from center sells the reversal.
+      spawnRing(state, 50, 50, c, 18, 60);
+      spawnRing(state, 50, 50, '#ffd966', 28, 80);
+      spawnRing(state, 50, 50, c, 40, 110);
+      bumpShake(34);
+      // Subtle screen tint toward winner's color
+      state.victoryFlash = { color: c, age: 0, life: 35 };
+      break;
+    }
+    case 'player_eliminated': {
+      // 4p mid-game elimination. Dim color = the eliminated player's color
+      // (final blast in their own color), with a desaturating overlay.
+      const lostName = event.owner >= 0 ? NAMES[event.owner] : '';
+      const lostCol = event.owner >= 0 ? COLORS[event.owner] : '#888';
+      const mode = event.eliminationMode;
+      const sub = mode === 'oob' ? `${lostName} lost in the void`
+                : mode === 'captured' ? `${lostName} loses last planet`
+                : `${lostName} eliminated`;
+      spawnExplosion(state, event.x, event.y, lostCol, 110, 3.8);
+      spawnExplosion(state, event.x, event.y, '#ffffff', 25, 4.5);
+      spawnRing(state, event.x, event.y, lostCol, 16, 80);
+      spawnRing(state, event.x, event.y, '#cccccc', 26, 110);
+      pushCaption(state, 'ELIMINATED', sub, lostCol, 200);
+      bumpShake(40);
+      // Brief grey screen flash -- the player's gone.
+      state.victoryFlash = { color: '#888888', age: 0, life: 30 };
+      break;
+    }
+    case 'failed_assault': {
+      // Last fleet hit a planet but couldn't take it. Visual: attacker bursts
+      // *against* the planet's halo in the target owner's color, then a
+      // smaller wash in the attacker's color showing they're gone.
+      const atkCol = event.owner >= 0 ? COLORS[event.owner] : '#888';
+      const defCol = event.targetOwner >= 0 ? COLORS[event.targetOwner] : '#888';
+      const atkName = event.owner >= 0 ? NAMES[event.owner] : '';
+      // Defender's halo "absorbs" the hit
+      spawnExplosion(state, event.targetX || event.x, event.targetY || event.y,
+        defCol, 60, 3.0);
+      spawnRing(state, event.targetX || event.x, event.targetY || event.y,
+        defCol, 14, 80);
+      // Attacker's last gasp at the impact point
+      spawnExplosion(state, event.x, event.y, atkCol, 50, 2.6);
+      spawnRing(state, event.x, event.y, atkCol, 10, 60);
+      const headline = event.gameEnder ? 'LAST STAND FAILS' : 'REPELLED';
+      const sub = event.gameEnder
+        ? `${atkName} can't break the line`
+        : `${atkName}'s final assault breaks against ${NAMES[event.targetOwner] || 'the defender'}`;
+      pushCaption(state, headline, sub, defCol, event.gameEnder ? 280 : 200);
+      bumpShake(event.gameEnder ? 55 : 32);
+      if (event.gameEnder) {
+        state.victoryFlash = { color: defCol, age: 0, life: 50 };
+      }
       break;
     }
   }
@@ -1733,6 +2039,44 @@ function processStepTransition(t) {
   // damage numbers, and triggers streak/biggest-fleet callouts.
   if (t < 1 || t >= frames.length) return;
   const prev = frames[t-1], cur = frames[t];
+  // Force-field barrier flashes -- any fleet that died this step with its
+  // projected next position off the [0,100]^2 board hit the edge. Spawn a
+  // localized red glow at the exit point so the boundary feels solid.
+  {
+    const curFleetIds = new Set(cur.fleets.map(f => f[0]));
+    for (const f of prev.fleets) {
+      if (curFleetIds.has(f[0])) continue;
+      const speed = fleetSpeed(f[6]);
+      const vx = Math.cos(f[4]) * speed;
+      const vy = Math.sin(f[4]) * speed;
+      const nx = f[2] + vx, ny = f[3] + vy;
+      if (nx < 0 || nx > 100 || ny < 0 || ny > 100) {
+        // Where does the fleet line cross the boundary?
+        let aCross = 1.0;
+        if (vx > 1e-6) aCross = Math.min(aCross, (100 - f[2]) / vx);
+        else if (vx < -1e-6) aCross = Math.min(aCross, -f[2] / vx);
+        if (vy > 1e-6) aCross = Math.min(aCross, (100 - f[3]) / vy);
+        else if (vy < -1e-6) aCross = Math.min(aCross, -f[3] / vy);
+        aCross = Math.max(0, Math.min(1, aCross));
+        const ex = f[2] + vx * aCross;
+        const ey = f[3] + vy * aCross;
+        // Snap to whichever edge is closest so the glow sits exactly on it.
+        const dT = ey, dB = 100 - ey, dL = ex, dR = 100 - ex;
+        const minD = Math.min(dT, dB, dL, dR);
+        let edge = 'T', exX = ex, exY = ey;
+        if (minD === dT)      { edge = 'T'; exY = 0; }
+        else if (minD === dB) { edge = 'B'; exY = 100; }
+        else if (minD === dL) { edge = 'L'; exX = 0; }
+        else                  { edge = 'R'; exX = 100; }
+        cinemaState.barrierFlashes.push({
+          x: exX, y: exY, edge, age: 0, life: 55,
+          ships: f[6], owner: f[1],
+        });
+        if (cinemaState.barrierFlashes.length > 12)
+          cinemaState.barrierFlashes.splice(0, cinemaState.barrierFlashes.length - 12);
+      }
+    }
+  }
   // Launch puffs for newly created fleets.
   const prevIds = new Set(prev.fleets.map(f => f[0]));
   for (const f of cur.fleets) {
@@ -1756,6 +2100,25 @@ function processStepTransition(t) {
       }
     }
   }
+  // Production-tick pulses: every owned, non-comet planet emits a faint
+  // ring sized by its production. Drawn before damage / flip effects so big
+  // explosions overdraw cleanly. Skipped during fast-forward (the whole
+  // processStepTransition body already is) so we never accumulate them.
+  const cometNow = new Set(cur.comet_planet_ids || []);
+  for (const p of cur.planets) {
+    if (p[1] < 0) continue;       // neutral
+    if (cometNow.has(p[0])) continue; // comets don't produce
+    if (p[6] <= 0) continue;      // zero-production
+    const baseCol = COLORS[p[1]];
+    cinemaState.flashes.push({
+      x: p[2], y: p[3],
+      age: 0, life: 18,
+      // Append two-char hex alpha (~0.2) so the ring is subtle vs explosions.
+      color: baseCol + '33',
+      radius: 0,
+      maxRadius: p[4] * (1.4 + Math.min(p[6], 6) * 0.18),
+    });
+  }
   // Damage numbers + capture-effect particles for every player-on-player flip
   // (regardless of whether the flip was selected for the cinema highlight reel).
   const prevById = {}; for (const p of prev.planets) prevById[p[0]] = p;
@@ -1773,6 +2136,21 @@ function processStepTransition(t) {
       spawnExplosion(cinemaState, p[2], p[3], toCol, 28, 2.0);
       spawnShockwave(cinemaState, p[2], p[3], toCol);
       cinemaState.shake = Math.max(cinemaState.shake, 14);
+      // Streak tag: one running tag that hops to whichever planet was just
+      // captured in the current run. rc==1 means a new run started (different
+      // player or 40+ ticks since last flip) -- clear the tag.
+      const rc = cinemaState.ultra && cinemaState.ultra.flipRunCount
+        ? cinemaState.ultra.flipRunCount[`${t}:${p[0]}`] : null;
+      if (rc && rc >= 2) {
+        cinemaState.streakTag = {
+          pid: p[0],
+          text: `STREAK ×${rc}`,
+          color: toCol,
+          age: 0, life: 130,
+        };
+      } else if (rc === 1) {
+        cinemaState.streakTag = null;
+      }
     }
     // Damage-number text
     if (!ownerChanged && Math.abs(delta) <= old[6]) continue;
@@ -1821,19 +2199,123 @@ function processStepTransition(t) {
   }
 }
 
+// Advances all per-frame state mutations (particle aging, shake decay, caption
+// aging, fleet-trail accumulation, etc.). Called once per frame, BEFORE the
+// scene is drawn -- because in split-screen mode the scene draw runs once per
+// pane and these mutations must not be re-applied per pane.
+function tickWorldState(fa, fb, alpha) {
+  // Shake decay
+  if (cinemaState.shake > 0) {
+    cinemaState.shake *= 0.92;
+    if (cinemaState.shake < 0.4) cinemaState.shake = 0;
+  }
+  // Particle / flash rates -- slower aging during slowmo / impact so the
+  // dramatic beat doesn't lose its embers.
+  const curShot = cinemaState.shots[cinemaState.shotIdx];
+  const slowShot = curShot && (curShot.kind === 'slowmo' || curShot.kind === 'impact' || curShot.kind === 'multi');
+  const ageRate = slowShot ? 0.35 : 1.0;
+  const motionRate = slowShot ? 0.5 : 1.0;
+  // Particles
+  for (let i = cinemaState.particles.length - 1; i >= 0; i--) {
+    const p = cinemaState.particles[i];
+    p.age += ageRate;
+    p.x += p.vx * motionRate; p.y += p.vy * motionRate;
+    p.vx *= 0.96; p.vy *= 0.96;
+    if (p.age >= p.life) cinemaState.particles.splice(i, 1);
+  }
+  // Flashes (radius gets recomputed at draw time from age/life)
+  for (let i = cinemaState.flashes.length - 1; i >= 0; i--) {
+    const fl = cinemaState.flashes[i];
+    fl.age += ageRate;
+    if (fl.age >= fl.life) cinemaState.flashes.splice(i, 1);
+  }
+  // Damage numbers
+  for (let i = cinemaState.damageNumbers.length - 1; i >= 0; i--) {
+    const d = cinemaState.damageNumbers[i];
+    d.age++;
+    d.y += d.vy;
+    if (d.age >= d.life) cinemaState.damageNumbers.splice(i, 1);
+  }
+  // Captions
+  if (cinemaState.captions.length) {
+    const c = cinemaState.captions[0];
+    c.age++;
+    if (c.age >= c.life) cinemaState.captions.length = 0;
+  }
+  // Per-pane captions (multi-shot, mixed-type case)
+  if (cinemaState.paneCaptions) {
+    for (let i = cinemaState.paneCaptions.length - 1; i >= 0; i--) {
+      const pc = cinemaState.paneCaptions[i];
+      pc.age++;
+      if (pc.age >= pc.life) cinemaState.paneCaptions.splice(i, 1);
+    }
+  }
+  // Victory flash
+  if (cinemaState.victoryFlash) {
+    cinemaState.victoryFlash.age++;
+    if (cinemaState.victoryFlash.age >= cinemaState.victoryFlash.life)
+      cinemaState.victoryFlash = null;
+  }
+  // Edge-flash alpha lerp
+  if (cinemaState.edgeFlashAlpha === undefined) cinemaState.edgeFlashAlpha = 0;
+  const eTarget = cinemaState.edgeFlashTarget || 0;
+  cinemaState.edgeFlashAlpha += (eTarget - cinemaState.edgeFlashAlpha) * 0.06;
+  // Record fleet tags
+  if (cinemaState.recordFleetTags) {
+    for (let i = cinemaState.recordFleetTags.length - 1; i >= 0; i--) {
+      const tag = cinemaState.recordFleetTags[i];
+      tag.age++;
+      if (tag.age >= tag.life) cinemaState.recordFleetTags.splice(i, 1);
+    }
+  }
+  // Streak tag
+  if (cinemaState.streakTag) {
+    cinemaState.streakTag.age++;
+    if (cinemaState.streakTag.age >= cinemaState.streakTag.life)
+      cinemaState.streakTag = null;
+  }
+  // Barrier flashes (localized force-field hits)
+  if (cinemaState.barrierFlashes) {
+    for (let i = cinemaState.barrierFlashes.length - 1; i >= 0; i--) {
+      const bf = cinemaState.barrierFlashes[i];
+      bf.age += ageRate;
+      if (bf.age >= bf.life) cinemaState.barrierFlashes.splice(i, 1);
+    }
+  }
+  // Fleet trail accumulation (once per frame, even in multi-pane mode)
+  const fleetsA = {};
+  for (const f of fa.fleets) fleetsA[f[0]] = f;
+  for (const f of fb.fleets) {
+    const prev = fleetsA[f[0]];
+    let x, y, owner = f[1];
+    if (prev) {
+      x = prev[2] + (f[2] - prev[2]) * alpha;
+      y = prev[3] + (f[3] - prev[3]) * alpha;
+    } else { x = f[2]; y = f[3]; }
+    let tr = cinemaState.fleetTrails.get(f[0]);
+    if (!tr) { tr = []; cinemaState.fleetTrails.set(f[0], tr); }
+    tr.push({ x, y, owner });
+    if (tr.length > 12) tr.shift();
+  }
+  for (const [fid, tr] of cinemaState.fleetTrails) {
+    const stillExists = fb.fleets.some(f => f[0] === fid);
+    if (!stillExists) {
+      if (tr.length > 0) tr.shift();
+      if (tr.length === 0) cinemaState.fleetTrails.delete(fid);
+    }
+  }
+}
+
 function drawCinemaFrame() {
   if (!cinemaState) return;
   const W = board.width, H = board.height;
-  const gameScale = Math.min(W, H) / 100;
-  const cam = cinemaState.cam;
-  smoothCamera(cam);
   // Process newly-crossed step boundaries for one-shot effects (ultra only).
   const newStep = Math.floor(cinemaState.stepFloat);
   if (newStep > cinemaState.lastSeenStepBoundary) {
-    const curShot = cinemaState.shots[cinemaState.shotIdx];
+    const curShot0 = cinemaState.shots[cinemaState.shotIdx];
     // Skip during fast-forward fills -- not worth the per-step work and the
     // accumulated particles tank framerate.
-    if (!curShot || curShot.kind !== 'fill') {
+    if (!curShot0 || curShot0.kind !== 'fill') {
       for (let t = cinemaState.lastSeenStepBoundary + 1; t <= newStep; t++) {
         processStepTransition(t);
       }
@@ -1845,19 +2327,89 @@ function drawCinemaFrame() {
     if (cinemaState.damageNumbers.length > 40)
       cinemaState.damageNumbers.splice(0, cinemaState.damageNumbers.length - 40);
   }
-  // Decay screen shake -- slower decay than the regular view so big events
-  // are felt for a good half-second.
-  if (cinemaState.shake > 0) {
-    cinemaState.shake *= 0.92;
-    if (cinemaState.shake < 0.4) cinemaState.shake = 0;
-  }
+
+  // Compute interpolation state once per frame (shared across all panes).
+  const stepFloor = Math.max(0, Math.min(frames.length - 1, Math.floor(cinemaState.stepFloat)));
+  const stepNext = Math.min(frames.length - 1, stepFloor + 1);
+  const alpha = cinemaState.stepFloat - stepFloor;
+  const fa = frames[stepFloor];
+  const fb = frames[stepNext];
+  const av = fa.angular_velocity || 0;
+
+  // Tick all per-frame state mutations BEFORE the scene draw, so split-screen
+  // doesn't tick them once per pane.
+  tickWorldState(fa, fb, alpha);
+
   const sx = (cinemaState.shake > 0) ? (Math.random() - 0.5) * cinemaState.shake : 0;
   const sy = (cinemaState.shake > 0) ? (Math.random() - 0.5) * cinemaState.shake : 0;
+
+  // Build the list of viewports to render. Single shot: one full-screen pane.
+  // Multi shot: one viewport per event, positioned by computePaneLayoutFracs.
+  const shotCur = cinemaState.shots[cinemaState.shotIdx];
+  const panes = (shotCur && shotCur.kind === 'multi' && shotCur.panes)
+    ? materializePanes(shotCur, W, H, 0.78)
+    : [{ x: 0, y: 0, w: W, h: H, cam: cinemaState.cam }];
+  for (const pane of panes) smoothCamera(pane.cam);
+
+  // Re-declare shared interp tables once for the closure used by world draw.
+  const planetsA = {};
+  for (const p of fa.planets) planetsA[p[0]] = p;
+  const planetsB = {};
+  for (const p of fb.planets) planetsB[p[0]] = p;
+  const fleetsA = {};
+  for (const f of fa.fleets) fleetsA[f[0]] = f;
+  const fbIds = new Set(fb.fleets.map(f => f[0]));
+
+  // ---- Per-pane scene render ----
+  for (let paneIdx = 0; paneIdx < panes.length; paneIdx++) {
+    const pane = panes[paneIdx];
+    const multi = panes.length > 1;
+    if (multi) {
+      bctx.save();
+      bctx.beginPath();
+      bctx.rect(pane.x, pane.y, pane.w, pane.h);
+      bctx.clip();
+      bctx.translate(pane.x, pane.y);
+    }
+    const W = pane.w, H = pane.h, cam = pane.cam;
+    const gameScale = Math.min(W, H) / 100;
   // Background fills the whole viewport, not just the game region.
   const bg = bctx.createRadialGradient(W/2, H/2, 10, W/2, H/2, Math.max(W, H));
   bg.addColorStop(0, '#0a1230'); bg.addColorStop(1, '#02040c');
   bctx.fillStyle = bg;
   bctx.fillRect(0, 0, W, H);
+  // Background nebula -- 5 drifting colored fog blobs that slowly orbit and
+  // tint toward whichever player currently leads in ship count. Drawn before
+  // the starfield so stars sit on top.
+  {
+    const stepIdx = Math.max(0, Math.min(frames.length - 1, Math.floor(cinemaState.stepFloat)));
+    let leadCol = '#3a4880', laggCol = '#5a3a78';
+    if (N_AGENTS >= 2) {
+      const s0 = series.ships[0][stepIdx];
+      const s1 = series.ships[1][stepIdx];
+      const total = s0 + s1 || 1;
+      const dom = (s0 - s1) / total;  // -1..+1
+      const p0c = COLORS[0], p1c = COLORS[1];
+      leadCol = dom >= 0 ? p0c : p1c;
+      laggCol = dom >= 0 ? p1c : p0c;
+    }
+    const driftT = cinemaState.stepFloat * 0.04;
+    bctx.globalCompositeOperation = 'lighter';
+    for (let n = 0; n < 5; n++) {
+      const seed = n * 17.3;
+      const cx = (Math.sin(seed + driftT * 0.3) * 0.5 + 0.5) * W;
+      const cy = (Math.cos(seed * 1.4 + driftT * 0.22) * 0.5 + 0.5) * H;
+      const r = (0.18 + 0.08 * Math.sin(seed * 2 + driftT * 0.5)) * Math.max(W, H);
+      const col = (n % 2 === 0) ? leadCol : laggCol;
+      const g = bctx.createRadialGradient(cx, cy, 0, cx, cy, r);
+      g.addColorStop(0, col + '22');
+      g.addColorStop(0.5, col + '10');
+      g.addColorStop(1, col + '00');
+      bctx.fillStyle = g;
+      bctx.fillRect(0, 0, W, H);
+    }
+    bctx.globalCompositeOperation = 'source-over';
+  }
   // Starfield drawn in canvas space (not warped by camera) so stars fill the
   // entire viewport including the bars outside the square game area.
   bctx.fillStyle = '#ffffff';
@@ -1870,32 +2422,36 @@ function drawCinemaFrame() {
   }
   bctx.globalAlpha = 1;
 
-  // Sun
+  // Sun -- outer halo tints toward whichever player currently leads in ship
+  // count. Core stays warm so the sun is still recognisable; only the rim
+  // and corona swap colour.
   const [sunX, sunY] = projectCam(50, 50, cam, W, H);
   const sunR = 10 * cam.zoom * gameScale;
+  let sunHaloCol = '#ff5a1a';
+  let sunCoronaCol = '#ffb45a';
+  if (N_AGENTS >= 2) {
+    const stepIdxS = Math.max(0, Math.min(frames.length - 1, Math.floor(cinemaState.stepFloat)));
+    let bestP = -1, bestShips = -1;
+    for (let p = 0; p < N_AGENTS; p++) {
+      const s = series.ships[p] ? series.ships[p][stepIdxS] : 0;
+      if (s > bestShips) { bestShips = s; bestP = p; }
+    }
+    if (bestP >= 0 && bestShips > 0) {
+      sunHaloCol = COLORS[bestP];
+      sunCoronaCol = COLORS[bestP];
+    }
+  }
   const sg = bctx.createRadialGradient(sunX, sunY, sunR * 0.2, sunX, sunY, sunR);
-  sg.addColorStop(0, '#fff5d2'); sg.addColorStop(0.4, '#ffb84a'); sg.addColorStop(1, '#ff5a1aaa');
+  sg.addColorStop(0, '#fff5d2');
+  sg.addColorStop(0.4, '#ffb84a');
+  sg.addColorStop(1, sunHaloCol + 'cc');
   bctx.fillStyle = sg;
   bctx.beginPath(); bctx.arc(sunX + sx, sunY + sy, sunR, 0, PI2); bctx.fill();
-  // Sun corona pulse
+  // Sun corona pulse (matches halo tint).
   const pulse = (Math.sin(cinemaState.stepFloat * 0.3) + 1) * 0.5;
-  bctx.strokeStyle = `rgba(255,180,90,${0.25 - pulse * 0.15})`;
+  bctx.strokeStyle = sunCoronaCol + Math.floor((0.25 - pulse * 0.15) * 255).toString(16).padStart(2, '0');
   bctx.lineWidth = 3;
   bctx.beginPath(); bctx.arc(sunX + sx, sunY + sy, sunR * (1.2 + pulse * 0.1), 0, PI2); bctx.stroke();
-
-  // Interpolated step
-  const stepFloor = Math.max(0, Math.min(frames.length - 1, Math.floor(cinemaState.stepFloat)));
-  const stepNext = Math.min(frames.length - 1, stepFloor + 1);
-  const alpha = cinemaState.stepFloat - stepFloor;
-  const fa = frames[stepFloor];
-  const fb = frames[stepNext];
-  const av = fa.angular_velocity || 0;
-
-  // Map planets by id for interp
-  const planetsB = {};
-  for (const p of fb.planets) planetsB[p[0]] = p;
-  const planetsA = {};
-  for (const p of fa.planets) planetsA[p[0]] = p;
 
   // Planet trails (cinema-style faint trail)
   if (trailsChk.checked) {
@@ -1933,34 +2489,8 @@ function drawCinemaFrame() {
     bctx.fillText(String(showP[5]), px + sx, py + sy);
   }
 
-  // Fleet lookup by id from prev frame (also used below by the fleet draw passes)
-  const fleetsA = {};
-  for (const f of fa.fleets) fleetsA[f[0]] = f;
-  const fbIds = new Set(fb.fleets.map(f => f[0]));
-
-  // Fleet trails -- record current interpolated positions and draw fading tail.
+  // Fleet trails -- draw the polylines (mutation is in tickWorldState).
   {
-    for (const f of fb.fleets) {
-      const prev = fleetsA[f[0]];
-      let x, y, owner = f[1];
-      if (prev) {
-        x = prev[2] + (f[2] - prev[2]) * alpha;
-        y = prev[3] + (f[3] - prev[3]) * alpha;
-      } else { x = f[2]; y = f[3]; }
-      let tr = cinemaState.fleetTrails.get(f[0]);
-      if (!tr) { tr = []; cinemaState.fleetTrails.set(f[0], tr); }
-      tr.push({ x, y, owner });
-      if (tr.length > 12) tr.shift();
-    }
-    // Clean up trails for fleets that no longer exist (after a few frames so
-    // their tail can linger visually).
-    for (const [fid, tr] of cinemaState.fleetTrails) {
-      const stillExists = fb.fleets.some(f => f[0] === fid);
-      if (!stillExists) {
-        if (tr.length > 0) tr.shift();
-        if (tr.length === 0) cinemaState.fleetTrails.delete(fid);
-      }
-    }
     // Draw trails (under fleets) -- one polyline per fleet, mid alpha.
     bctx.globalAlpha = 0.45;
     bctx.lineCap = 'round';
@@ -2074,18 +2604,39 @@ function drawCinemaFrame() {
     drawFleetTri(x, y, f[4], f[6], f[1], fade);
   }
 
-  // Record-fleet tags floating on the actual fleet.
+  // Running STREAK ×N tag (single instance, hops to whichever planet was
+  // just captured). Same fade-in / fade-out shape as record-fleet tags.
+  // Aging happens in tickWorldState; this block only draws.
+  if (cinemaState.streakTag) {
+    const tag = cinemaState.streakTag;
+    const planet = fb.planets.find(p => p[0] === tag.pid);
+    if (planet) {
+      const prevP = planetsA[tag.pid];
+      const interp = getInterpolatedPlanet(planet, prevP, alpha, av);
+      const [px, py] = projectCam(interp.x, interp.y, cam, W, H);
+      const sr = planet[4] * cam.zoom * gameScale;
+      const fade = tag.age < 12 ? tag.age / 12 :
+                   (tag.age > tag.life - 30 ? (tag.life - tag.age) / 30 : 1);
+      const rise = Math.min(1, tag.age / 60) * (gameScale * 1.2);
+      const fs = Math.max(10, gameScale * cam.zoom * 1.4);
+      bctx.globalAlpha = fade;
+      bctx.font = `bold ${fs}px sans-serif`;
+      bctx.textAlign = 'center'; bctx.textBaseline = 'bottom';
+      bctx.shadowColor = '#000'; bctx.shadowBlur = 4;
+      bctx.fillStyle = tag.color;
+      bctx.fillText(tag.text, px + sx, py + sy - sr - 6 - rise);
+      bctx.shadowBlur = 0;
+      bctx.globalAlpha = 1;
+    }
+  }
+
+  // Record-fleet tags floating on the actual fleet. Aging is in tickWorldState.
   if (cinemaState.recordFleetTags && cinemaState.recordFleetTags.length) {
-    for (let i = cinemaState.recordFleetTags.length - 1; i >= 0; i--) {
+    for (let i = 0; i < cinemaState.recordFleetTags.length; i++) {
       const tag = cinemaState.recordFleetTags[i];
-      tag.age++;
-      // Find current fleet; if it's gone, drop the tag.
       const cur = fb.fleets.find(f => f[0] === tag.fleetId);
       const prev = cur ? fleetsA[tag.fleetId] : null;
-      if (!cur || tag.age >= tag.life) {
-        cinemaState.recordFleetTags.splice(i, 1);
-        continue;
-      }
+      if (!cur) continue;
       const x = prev ? prev[2] + (cur[2] - prev[2]) * alpha : cur[2];
       const y = prev ? prev[3] + (cur[3] - prev[3]) * alpha : cur[3];
       const [px, py] = projectCam(x, y, cam, W, H);
@@ -2115,15 +2666,22 @@ function drawCinemaFrame() {
       let liveCount = 0;
       for (const t of win.flipTicks) if (t <= curT) liveCount++;
       if (liveCount < 3) continue;  // not yet labeled until 3 flips have aired
+      const lastFlipT = win.flipTicks[liveCount - 1];
+      const sinceFlip = curT - lastFlipT;
+      // Inactivity fade: full alpha for the first 20 ticks after a flip, then
+      // ramp down to 0 by ~40 ticks of quiet. Skip drawing entirely once gone.
+      const fadeAlpha = sinceFlip <= 20 ? 1
+                       : sinceFlip >= 40 ? 0
+                       : 1 - (sinceFlip - 20) / 20;
+      if (fadeAlpha <= 0.02) continue;
       const prev = planetsA[p[0]];
       const interp = getInterpolatedPlanet(p, prev, alpha, av);
       const [px, py] = projectCam(interp.x, interp.y, cam, W, H);
       const sr = p[4] * cam.zoom * gameScale;
       // Pulsing red ring -- briefly pulse harder right after a new flip.
-      const lastFlipT = win.flipTicks[liveCount - 1];
-      const sinceFlip = curT - lastFlipT;
       const flipBoost = sinceFlip < 8 ? (1 - sinceFlip / 8) : 0;
       const pulse = 0.7 + 0.3 * Math.sin(cinemaState.stepFloat * 0.4) + flipBoost * 0.6;
+      bctx.globalAlpha = fadeAlpha;
       bctx.strokeStyle = `rgba(255, 90, 90, ${Math.min(1, 0.5 * pulse)})`;
       bctx.lineWidth = 2 + flipBoost * 2;
       bctx.beginPath();
@@ -2145,14 +2703,12 @@ function drawCinemaFrame() {
       bctx.fillRect(px + sx - w / 2, ty - (placeBelow ? 2 : fs + 2), w, fs + 4);
       bctx.fillStyle = '#ff5a5a';
       bctx.fillText(`CONTESTED ×${liveCount}`, px + sx, ty);
+      bctx.globalAlpha = 1;
     }
     // Floating damage numbers (single draw with shadow for outline)
     bctx.textAlign = 'center'; bctx.textBaseline = 'middle';
-    for (let i = cinemaState.damageNumbers.length - 1; i >= 0; i--) {
+    for (let i = 0; i < cinemaState.damageNumbers.length; i++) {
       const d = cinemaState.damageNumbers[i];
-      d.age++;
-      d.y += d.vy;
-      if (d.age >= d.life) { cinemaState.damageNumbers.splice(i, 1); continue; }
       const a = d.age < 6 ? d.age / 6 : (d.age > d.life - 16 ? (d.life - d.age) / 16 : 1);
       const [px, py] = projectCam(d.x, d.y, cam, W, H);
       if (px < -30 || px > W + 30 || py < -30 || py > H + 30) continue;
@@ -2167,30 +2723,24 @@ function drawCinemaFrame() {
     }
   }
 
-  // Particles & flashes
+  // Particles & flashes (aging happens in tickWorldState).
   bctx.shadowBlur = 0;
-  for (let i = cinemaState.particles.length - 1; i >= 0; i--) {
+  for (let i = 0; i < cinemaState.particles.length; i++) {
     const p = cinemaState.particles[i];
-    p.age++;
-    p.x += p.vx; p.y += p.vy;
-    p.vx *= 0.96; p.vy *= 0.96;
-    if (p.age >= p.life) { cinemaState.particles.splice(i, 1); continue; }
     const a = 1 - p.age / p.life;
     const [px, py] = projectCam(p.x, p.y, cam, W, H);
     bctx.fillStyle = p.color;
     bctx.globalAlpha = a;
     bctx.beginPath(); bctx.arc(px + sx, py + sy, p.size * cam.zoom * gameScale * 0.4, 0, PI2); bctx.fill();
   }
-  for (let i = cinemaState.flashes.length - 1; i >= 0; i--) {
+  for (let i = 0; i < cinemaState.flashes.length; i++) {
     const fl = cinemaState.flashes[i];
-    fl.age++;
-    if (fl.age >= fl.life) { cinemaState.flashes.splice(i, 1); continue; }
     const a = 1 - fl.age / fl.life;
-    fl.radius = fl.maxRadius * easeOutCubic(fl.age / fl.life);
+    const r = fl.maxRadius * easeOutCubic(Math.min(1, fl.age / fl.life));
     const [px, py] = projectCam(fl.x, fl.y, cam, W, H);
     bctx.globalAlpha = a;
     bctx.strokeStyle = fl.color; bctx.lineWidth = 2 * cam.zoom;
-    bctx.beginPath(); bctx.arc(px + sx, py + sy, fl.radius * cam.zoom * gameScale, 0, PI2); bctx.stroke();
+    bctx.beginPath(); bctx.arc(px + sx, py + sy, r * cam.zoom * gameScale, 0, PI2); bctx.stroke();
   }
   bctx.globalAlpha = 1;
 
@@ -2201,40 +2751,100 @@ function drawCinemaFrame() {
   bctx.fillStyle = vg;
   bctx.fillRect(0, 0, W, H);
 
-  // Edge-of-map red border (game-ending OOB elimination effect). Alpha
-  // lerps toward edgeFlashTarget; rendered as a stroked rect projected
-  // through the camera so it tracks zoom/pan/shake.
-  if (cinemaState.edgeFlashAlpha === undefined) cinemaState.edgeFlashAlpha = 0;
-  const eTarget = cinemaState.edgeFlashTarget || 0;
-  cinemaState.edgeFlashAlpha += (eTarget - cinemaState.edgeFlashAlpha) * 0.06;
+  // Localized barrier flashes -- every fleet that hits an edge of the map
+  // (not just game-enders) leaves a small radial red glow at its impact point.
+  // The glow is centred on the boundary so half of it sits "outside" the map,
+  // giving a force-field-membrane feel.
+  if (cinemaState.barrierFlashes && cinemaState.barrierFlashes.length) {
+    for (const bf of cinemaState.barrierFlashes) {
+      const ap = 1 - bf.age / bf.life;
+      const easedIn = bf.age < 6 ? bf.age / 6 : 1;
+      const a = ap * easedIn;
+      if (a <= 0.02) continue;
+      const [px, py] = projectCam(bf.x, bf.y, cam, W, H);
+      // Radius scales with ship size + zoom + life. Larger fleets ripple more.
+      const baseR = (3 + Math.min(20, bf.ships) * 0.35) * cam.zoom * gameScale;
+      const r = baseR * (0.7 + (1 - ap) * 0.6);  // expands slightly as it fades
+      // Outer dim halo
+      const g = bctx.createRadialGradient(px + sx, py + sy, 0,
+                                          px + sx, py + sy, r * 1.8);
+      g.addColorStop(0,   `rgba(255, 90, 90, ${a * 0.85})`);
+      g.addColorStop(0.4, `rgba(255, 60, 60, ${a * 0.45})`);
+      g.addColorStop(1,   'rgba(255, 30, 30, 0)');
+      bctx.fillStyle = g;
+      bctx.beginPath();
+      bctx.arc(px + sx, py + sy, r * 1.8, 0, PI2);
+      bctx.fill();
+      // Hot inner core
+      const g2 = bctx.createRadialGradient(px + sx, py + sy, 0,
+                                           px + sx, py + sy, r * 0.55);
+      g2.addColorStop(0, `rgba(255, 230, 200, ${a})`);
+      g2.addColorStop(1, `rgba(255, 90, 90, 0)`);
+      bctx.fillStyle = g2;
+      bctx.beginPath();
+      bctx.arc(px + sx, py + sy, r * 0.55, 0, PI2);
+      bctx.fill();
+      // Arc along the boundary edge at the hit point so the force-field shape
+      // reads. Draw a short stroked line on the appropriate edge.
+      const [bx1, by1] = projectCam(0, 0, cam, W, H);
+      const [bx2, by2] = projectCam(100, 100, cam, W, H);
+      bctx.strokeStyle = `rgba(255, 170, 170, ${a * 0.9})`;
+      bctx.lineWidth = 2;
+      bctx.shadowColor = `rgba(255, 80, 80, ${a})`;
+      bctx.shadowBlur = 10;
+      bctx.beginPath();
+      const segLen = r * 1.6;
+      if (bf.edge === 'T') {
+        bctx.moveTo(px + sx - segLen, by1 + sy);
+        bctx.lineTo(px + sx + segLen, by1 + sy);
+      } else if (bf.edge === 'B') {
+        bctx.moveTo(px + sx - segLen, by2 + sy);
+        bctx.lineTo(px + sx + segLen, by2 + sy);
+      } else if (bf.edge === 'L') {
+        bctx.moveTo(bx1 + sx, py + sy - segLen);
+        bctx.lineTo(bx1 + sx, py + sy + segLen);
+      } else {
+        bctx.moveTo(bx2 + sx, py + sy - segLen);
+        bctx.lineTo(bx2 + sx, py + sy + segLen);
+      }
+      bctx.stroke();
+      bctx.shadowBlur = 0;
+    }
+  }
+
+  // Edge-of-map red border (game-ending OOB elimination effect). Lerping
+  // happens in tickWorldState; per-pane just renders it.
   if (cinemaState.edgeFlashAlpha > 0.02) {
     const ea = cinemaState.edgeFlashAlpha;
     const [ex1, ey1] = projectCam(0, 0, cam, W, H);
     const [ex2, ey2] = projectCam(100, 100, cam, W, H);
-    // Pulsing thickness for drama
     const pulse = 0.85 + 0.15 * Math.sin(cinemaState.stepFloat * 1.5);
     const lw = (3 + 6 * ea) * pulse;
-    // Outer glow
     bctx.shadowColor = `rgba(255, 70, 70, ${ea * 0.95})`;
     bctx.shadowBlur = 18 * ea;
     bctx.strokeStyle = `rgba(255, 60, 60, ${ea * 0.9})`;
     bctx.lineWidth = lw;
     bctx.strokeRect(ex1 + sx, ey1 + sy, ex2 - ex1, ey2 - ey1);
-    // Inner bright line on top of the glow
     bctx.shadowBlur = 0;
     bctx.strokeStyle = `rgba(255, 170, 170, ${ea})`;
     bctx.lineWidth = Math.max(1, lw * 0.35);
     bctx.strokeRect(ex1 + sx, ey1 + sy, ex2 - ex1, ey2 - ey1);
   }
 
-  // Victory flash -- full-screen tinted overlay that fades out after the
-  // game-ending capture.
+    // Close the per-pane scope (drops back to full-canvas W/H below).
+    if (multi) bctx.restore();
+  } // end per-pane loop
+
+  // ----- Pane borders ----- (multi shot only)
+  if (panes.length > 1 && shotCur && shotCur.kind === 'multi') {
+    drawPaneBorders(panes, W, H, shotCur);
+  }
+
+  // ----- Full-canvas overlays -----
+  // Victory flash (aging in tickWorldState).
   if (cinemaState.victoryFlash) {
     const vf = cinemaState.victoryFlash;
-    vf.age++;
-    if (vf.age >= vf.life) {
-      cinemaState.victoryFlash = null;
-    } else {
+    {
       const a = vf.age < 8 ? vf.age / 8 : (1 - (vf.age - 8) / (vf.life - 8));
       bctx.globalAlpha = Math.max(0, a) * 0.45;
       bctx.fillStyle = vf.color;
@@ -2243,15 +2853,16 @@ function drawCinemaFrame() {
     }
   }
 
-  // Captions (only one rendered at a time -- pushCaption replaces; we just
-  // age the current one and drop it on expiry). Positioned above the hype
-  // panel (which starts at H * 0.78) so they don't collide with HIGHLIGHTS.
+  // Per-pane captions (only used in multi-shot with mixed event types).
+  if (cinemaState.paneCaptions && cinemaState.paneCaptions.length &&
+      shotCur && shotCur.kind === 'multi') {
+    drawPaneCaptions(cinemaState.paneCaptions, shotCur, W, H);
+  }
+
+  // Captions (aging in tickWorldState). Single overall caption above hype panel.
   if (cinemaState.captions.length) {
     const c = cinemaState.captions[0];
-    c.age++;
-    if (c.age >= c.life) {
-      cinemaState.captions.length = 0;
-    } else {
+    {
       const a = (c.age < 10) ? c.age / 10 : (c.age > c.life - 20 ? (c.life - c.age) / 20 : 1);
       bctx.globalAlpha = a;
       // Cap title font so 4K monitors don't get a 200px headline.
@@ -2259,10 +2870,13 @@ function drawCinemaFrame() {
       const subFs = Math.min(26, Math.floor(W * 0.018));
       bctx.font = `bold ${titleFs}px sans-serif`;
       bctx.textAlign = 'center'; bctx.textBaseline = 'middle';
-      const titleY = H * 0.60;       // above the hype panel band
-      const subY = titleY + titleFs * 0.95;
-      const boxTop = titleY - titleFs * 0.75;
+      // Sit the caption box just above the hype panel (which starts at H*0.78)
+      // rather than dead-center -- it was reading as obstructive at 0.60.
       const boxH = titleFs * (c.sub ? 2.0 : 1.5);
+      const boxBottom = H * 0.76;
+      const boxTop = boxBottom - boxH;
+      const titleY = boxTop + titleFs * 0.75;
+      const subY = titleY + titleFs * 0.95;
       bctx.fillStyle = '#000a';
       bctx.fillRect(0, boxTop, W, boxH);
       bctx.fillStyle = c.color;
@@ -2674,6 +3288,14 @@ function cinemaTick() {
       // Freeze frame on the event step; effects already triggered in slowmo
       if (cinemaState.shotFrame === 1) {
         triggerEventEffects(cinemaState, shot.event);
+        // Zoom-punch: snap zoom in over target for ~14 frames of faster lerp.
+        // lead_change/comeback have no physical location so skip the punch.
+        const et = shot.event && shot.event.type;
+        if (et && et !== 'lead_change' && et !== 'comeback') {
+          const punchMul = (et === 'final_capture' || et === 'edge_out') ? 1.18 : 1.22;
+          cinemaState.cam.zoom = cinemaState.cam.tzoom * punchMul;
+          cinemaState.cam.punchTtl = 14;
+        }
       }
       // Start fading out the edge-flash border partway through the hold.
       if (shot.event && shot.event.type === 'edge_out' &&
@@ -2688,9 +3310,178 @@ function cinemaTick() {
       if (cinemaState.shotFrame >= shot.duration) advanceShot();
       break;
     }
+    case 'multi': {
+      // Phases: split-in (0..splitInFrames) -> slowmo through events ->
+      // hold -> split-out. drawCinemaFrame uses shot._cams via materializePanes.
+      const slowmoFrames = Math.ceil((shot.toStep - shot.fromStep) / shot.slowmoStepsPerFrame);
+      const totalFrames = shot.splitInFrames + slowmoFrames + shot.holdFrames + shot.splitOutFrames;
+      const f = cinemaState.shotFrame;
+      if (f === 1) {
+        cinemaState.stepFloat = Math.max(cinemaState.stepFloat, shot.fromStep);
+        for (const p of shot.panes) p._triggered = false;
+      }
+      if (f <= shot.splitInFrames) {
+        // Split-in: panes hold their time at fromStep; cameras lerp from wide
+        // (initial) toward their event-focused targets (set on each pane).
+        for (const p of shot.panes) p._curTarget = p.target;
+        cinemaState.stepFloat = shot.fromStep;
+      } else if (f <= shot.splitInFrames + slowmoFrames) {
+        // Slowmo phase: advance time, fire events as their t is crossed.
+        cinemaState.stepFloat += shot.slowmoStepsPerFrame;
+        for (const p of shot.panes) {
+          if (!p._triggered && cinemaState.stepFloat >= p.event.t) {
+            p._triggered = true;
+            const capBefore = cinemaState.captions.slice();
+            triggerEventEffects(cinemaState, p.event);
+            if (!shot.allSameType) {
+              // Mixed types: relocate the just-pushed caption into per-pane.
+              if (cinemaState.captions.length > 0) {
+                const c = cinemaState.captions[0];
+                cinemaState.paneCaptions = cinemaState.paneCaptions || [];
+                cinemaState.paneCaptions.push({ ...c, paneIdx: shot.panes.indexOf(p) });
+                cinemaState.captions = capBefore;
+              }
+            }
+          }
+        }
+      } else if (f <= shot.splitInFrames + slowmoFrames + shot.holdFrames) {
+        // Hold phase: freeze at toStep.
+        cinemaState.stepFloat = shot.toStep;
+        // For same-type clusters, fire one aggregate caption on first hold frame.
+        if (shot.allSameType && !shot._aggFired) {
+          shot._aggFired = true;
+          const ev0 = shot.events[0];
+          const label = aggregateCaptionLabel(ev0.type);
+          const col = aggregateCaptionColor(shot.events);
+          pushCaption(cinemaState, `${shot.events.length}× ${label}`,
+            shot.events.length === 4 ? 'CHAOS' :
+            shot.events.length === 3 ? 'TRIPLE EVENT' : 'DOUBLE EVENT', col, 220);
+        }
+      } else {
+        // Split-out phase: cameras lerp back to wide; time stays at toStep.
+        for (const p of shot.panes) p._curTarget = { cx: 50, cy: 50, zoom: 0.78 };
+      }
+      if (f >= totalFrames) advanceShot();
+      break;
+    }
   }
   drawCinemaFrame();
   cinemaRAF = requestAnimationFrame(cinemaTick);
+}
+
+// Draw inter-pane borders + a thin glow line. Easing in/out so split-in and
+// split-out feel like a real "snap into halves" + "merge back" rather than a
+// hard cut. We derive the border alpha from shot phase.
+function drawPaneBorders(panes, W, H, shot) {
+  // Compute border alpha based on shot phase (1 during hold, lerping 0..1 in
+  // split-in, lerping 1..0 in split-out).
+  const f = cinemaState.shotFrame;
+  const slowmoFrames = Math.ceil((shot.toStep - shot.fromStep) / shot.slowmoStepsPerFrame);
+  let a = 1;
+  if (f <= shot.splitInFrames) a = f / shot.splitInFrames;
+  else if (f > shot.splitInFrames + slowmoFrames + shot.holdFrames) {
+    const outStart = shot.splitInFrames + slowmoFrames + shot.holdFrames;
+    a = Math.max(0, 1 - (f - outStart) / shot.splitOutFrames);
+  }
+  if (a <= 0.02) return;
+  // Find all unique X and Y border lines between pane rects.
+  const xs = new Set(), ys = new Set();
+  for (const p of panes) {
+    if (p.x > 0) xs.add(p.x);
+    if (p.x + p.w < W) xs.add(p.x + p.w);
+    if (p.y > 0) ys.add(p.y);
+    if (p.y + p.h < H) ys.add(p.y + p.h);
+  }
+  const lw = Math.max(2, Math.min(W, H) * 0.004);
+  bctx.save();
+  // Dark inner bar
+  bctx.fillStyle = `rgba(8, 12, 24, ${a * 0.95})`;
+  for (const x of xs) bctx.fillRect(x - lw, 0, lw * 2, H);
+  for (const y of ys) bctx.fillRect(0, y - lw, W, lw * 2);
+  // Bright outer hairline
+  bctx.strokeStyle = `rgba(255, 220, 130, ${a * 0.85})`;
+  bctx.lineWidth = 1.5;
+  bctx.shadowColor = `rgba(255, 200, 100, ${a * 0.8})`;
+  bctx.shadowBlur = 8;
+  bctx.beginPath();
+  for (const x of xs) { bctx.moveTo(x + 0.5, 0); bctx.lineTo(x + 0.5, H); }
+  for (const y of ys) { bctx.moveTo(0, y + 0.5); bctx.lineTo(W, y + 0.5); }
+  bctx.stroke();
+  bctx.shadowBlur = 0;
+  // Corner accent pips at the centre intersection (if any)
+  if (xs.size > 0 && ys.size > 0) {
+    bctx.fillStyle = `rgba(255, 230, 150, ${a})`;
+    for (const x of xs) for (const y of ys) {
+      bctx.beginPath(); bctx.arc(x, y, lw * 1.5, 0, PI2); bctx.fill();
+    }
+  }
+  bctx.restore();
+}
+
+// Draw per-pane captions inside the pane rect, near the bottom of the pane.
+function drawPaneCaptions(paneCaptions, shot, W, H) {
+  if (!shot.panes) return;
+  const liveCams = shot._cams || [];
+  const liveRects = shot.panes.map((p, i) => ({
+    x: Math.floor(p.fracX * W), y: Math.floor(p.fracY * H),
+    w: Math.ceil(p.fracW * W), h: Math.ceil(p.fracH * H),
+  }));
+  for (const pc of paneCaptions) {
+    const r = liveRects[pc.paneIdx];
+    if (!r) continue;
+    const a = (pc.age < 10) ? pc.age / 10 :
+              (pc.age > pc.life - 20 ? (pc.life - pc.age) / 20 : 1);
+    if (a <= 0) continue;
+    const titleFs = Math.min(36, Math.floor(r.w * 0.045));
+    const subFs = Math.min(16, Math.floor(r.w * 0.022));
+    const boxH = titleFs * (pc.sub ? 2.0 : 1.5);
+    const boxBottom = r.y + r.h * 0.88;
+    const boxTop = boxBottom - boxH;
+    const titleY = boxTop + titleFs * 0.75;
+    const subY = titleY + titleFs * 0.95;
+    bctx.globalAlpha = a;
+    bctx.fillStyle = 'rgba(0,0,0,0.65)';
+    bctx.fillRect(r.x + 4, boxTop, r.w - 8, boxH);
+    bctx.font = `bold ${titleFs}px sans-serif`;
+    bctx.textAlign = 'center'; bctx.textBaseline = 'middle';
+    bctx.fillStyle = pc.color;
+    bctx.fillText(pc.text, r.x + r.w / 2, titleY);
+    if (pc.sub) {
+      bctx.font = `${subFs}px sans-serif`;
+      bctx.fillStyle = '#fff';
+      bctx.fillText(pc.sub, r.x + r.w / 2, subY);
+    }
+    bctx.globalAlpha = 1;
+  }
+}
+
+function aggregateCaptionLabel(type) {
+  switch (type) {
+    case 'flip': return 'CAPTURES';
+    case 'final_capture': return 'FINAL BLOWS';
+    case 'edge_out': return 'INTO THE VOID';
+    case 'impact': return 'IMPACTS';
+    case 'sun_death': return 'SUN DEATHS';
+    case 'comet_sweep': return 'COMET SWEEPS';
+    case 'comet_spawn': return 'COMETS INCOMING';
+    case 'big_fleet': return 'MASSIVE ASSAULTS';
+    case 'lead_change': return 'LEAD CHANGES';
+    case 'comeback': return 'COMEBACKS';
+    case 'player_eliminated': return 'PLAYERS ELIMINATED';
+    case 'failed_assault': return 'ASSAULTS REPELLED';
+    default: return 'EVENTS';
+  }
+}
+
+function aggregateCaptionColor(events) {
+  // Pick the highest-importance event's color if it has one; else white.
+  const sorted = events.slice().sort((a, b) => b.importance - a.importance);
+  for (const e of sorted) {
+    if (e.owner !== undefined && e.owner >= 0) return COLORS[e.owner];
+    if (e.toOwner !== undefined && e.toOwner >= 0) return COLORS[e.toOwner];
+    if (e.toPlayer !== undefined && e.toPlayer >= 0) return COLORS[e.toPlayer];
+  }
+  return '#ffd966';
 }
 
 function startCinema() {
@@ -2720,9 +3511,14 @@ function stopCinema() {
   cinemaBtn.style.background = '#7a2b8c';
   document.body.classList.remove('cinema-active');
   cinemaState = null;
-  // Defer the resize so the grid layout has reflowed back to its non-cinema
-  // template before we measure the canvas's new parent dimensions. Bail out
-  // if cinema has been re-entered before the deferred frame fires.
+  // Force a synchronous reflow so getBoundingClientRect on the next resize
+  // reads the post-cinema grid layout, not the leftover full-viewport one.
+  // (Reading offsetHeight is the classic "flush layout" trick.)
+  void document.body.offsetHeight;
+  resizeCanvases();
+  draw();
+  // Belt-and-braces: schedule another resize next frame in case any deferred
+  // CSS / layout pass shifts things again.
   requestAnimationFrame(() => {
     if (cinemaMode) return;
     resizeCanvases();
