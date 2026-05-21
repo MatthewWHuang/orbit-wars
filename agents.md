@@ -1,5 +1,10 @@
 # Orbit Wars: Getting Started
 
+> Third-party notice: this file is based on Kaggle Orbit Wars competition
+> materials and starter-agent guidance and is included for convenience. It
+> remains subject to Kaggle's applicable terms and/or its original license,
+> except for any original modifications in this repository.
+
 This guide walks you through building an agent, testing it locally, and submitting it to the Orbit Wars competition on Kaggle.
 
 ## Game Overview

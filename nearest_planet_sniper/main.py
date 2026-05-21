@@ -1,6 +1,11 @@
 """
 Orbit Wars - Nearest Planet Sniper Agent
 
+Third-party notice: this starter-style example is based on Kaggle Orbit Wars
+competition materials and is included for convenience. It remains subject to
+Kaggle's applicable terms and/or its original license, except for any original
+modifications in this repository.
+
 A simple agent that captures the nearest unowned planet when it has
 enough ships to guarantee the takeover.
 

@@ -1,5 +1,10 @@
 # Orbit Wars
 
+> Third-party notice: this file is based on Kaggle Orbit Wars competition
+> materials and is included for convenience. It remains subject to Kaggle's
+> applicable terms and/or its original license, except for any original
+> modifications in this repository.
+
 Conquer planets rotating around a sun in continuous 2D space. A real-time strategy game for 2 or 4 players.
 
 ## Overview

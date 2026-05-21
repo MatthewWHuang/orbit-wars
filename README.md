@@ -162,6 +162,8 @@ python bundle.py bots/my_bot --submit -m "first try"
 
 ## License
 
-[PolyForm Noncommercial 1.0.0](LICENSE). Free for personal projects, research, education, hobby use, and noncommercial organizations, with attribution preserved. **Commercial use requires a separate license** — open an issue or contact me if you have a commercial use case in mind.
+Unless otherwise noted, this repository is licensed under the [PolyForm Noncommercial 1.0.0](LICENSE). Free for personal projects, research, education, hobby use, and noncommercial organizations, with license notices preserved. **Commercial use requires a separate license** - open an issue or contact me if you have a commercial use case in mind.
+
+Some files are derived from or describe Kaggle Orbit Wars competition materials and starter examples. Those files remain subject to Kaggle's applicable terms and/or their original license, except for any original modifications in this repository. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 Orbit Wars itself is a competition environment shipped in [kaggle-environments](https://github.com/Kaggle/kaggle-environments). This repo is independent tooling around it.
