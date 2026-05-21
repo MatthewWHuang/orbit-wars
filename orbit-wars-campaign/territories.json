@@ -1,0 +1,43 @@
+{
+  "name": "The Solar Frontier",
+  "start": "homeworld",
+  "boss": "tyrants_throne",
+  "territories": {
+    "homeworld": {
+      "lore": "Where it begins. A modest system, lightly defended.",
+      "seed": 100,
+      "config": {"boardSize": 100, "episodeSteps": 300},
+      "npc": "swarmer",
+      "neighbors": ["asteroid_belt", "comet_road"]
+    },
+    "asteroid_belt": {
+      "lore": "Tight quarters. The sun dominates the battlefield.",
+      "seed": 234,
+      "config": {"boardSize": 70, "episodeSteps": 250, "sunRadius": 15},
+      "npc": "turtle",
+      "neighbors": ["homeworld", "deep_dark"]
+    },
+    "comet_road": {
+      "lore": "The trade lanes. Comets streak through the engagement zone.",
+      "seed": 412,
+      "config": {"boardSize": 100, "episodeSteps": 500, "cometSpeed": 7.0},
+      "npc": "swarmer",
+      "neighbors": ["homeworld", "tyrants_throne"]
+    },
+    "deep_dark": {
+      "lore": "Vast and lonely. Positioning matters more than firepower.",
+      "seed": 999,
+      "config": {"boardSize": 150, "episodeSteps": 700},
+      "npc": "sniper",
+      "neighbors": ["asteroid_belt", "tyrants_throne"]
+    },
+    "tyrants_throne": {
+      "lore": "The final stand. Here the Sun Tyrant has fortified for ages.",
+      "seed": 7,
+      "config": {"boardSize": 130, "episodeSteps": 600, "sunRadius": 12},
+      "npc": "turtle",
+      "neighbors": ["comet_road", "deep_dark"],
+      "boss": true
+    }
+  }
+}

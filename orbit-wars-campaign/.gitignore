@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+state/*.json
+state/*.html
+campaign.html
+*.html
+!sample_*.html
+.venv/
+.idea/
+.vscode/

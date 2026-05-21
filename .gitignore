@@ -1,0 +1,19 @@
+/.claude
+/.vscode
+/orbit-wars.zip
+/orbit_wars.zip
+
+# Private bots live here (own git repo)
+/bots/
+
+# Per-match render outputs (not source)
+*.html
+
+__pycache__
+*.pyc
+
+venv/
+.venv/
+env/
+.env/
+ENV/
