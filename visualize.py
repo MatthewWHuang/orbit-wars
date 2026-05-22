@@ -2245,10 +2245,19 @@ function tickWorldState(fa, fb, alpha) {
     d.y += d.vy;
     if (d.age >= d.life) cinemaState.damageNumbers.splice(i, 1);
   }
-  // Captions
+  // Captions. During the decompress (zoom-out) shot, advance the caption's
+  // age aggressively toward its end so it actually expires alongside the
+  // visual fade -- otherwise once decompress ends, the next shot draws the
+  // caption at full alpha again since age < life.
   if (cinemaState.captions.length) {
     const c = cinemaState.captions[0];
     c.age++;
+    if (curShot && curShot.kind === 'decompress') {
+      const remaining = Math.max(1, curShot.duration - cinemaState.shotFrame);
+      const target = (c.priority || 1) >= 5 ? c.life - 20 : c.life;
+      const step = Math.max(1, Math.ceil((target - c.age) / remaining));
+      c.age = Math.min(target, c.age + step);
+    }
     if (c.age >= c.life) cinemaState.captions.length = 0;
   }
   // Per-pane captions (multi-shot, mixed-type case)
