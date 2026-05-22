@@ -10,6 +10,8 @@
 # Per-match render outputs (not source)
 *.html
 
+*.sh
+
 __pycache__
 *.pyc
 

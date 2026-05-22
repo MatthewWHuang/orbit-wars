@@ -21,6 +21,10 @@ python basic_run.py my_bot another_bot --seed 7
 
 # 4-player free-for-all
 python basic_run.py bot_a bot_b bot_c bot_d
+
+# Replay an existing match from a local JSON or a Kaggle episode link
+python play_replay.py path/to/replay.json
+python play_replay.py https://www.kaggle.com/episodes/12345678
 ```
 
 Each match writes a self-contained HTML viewer to `render.html` and opens it. Append `--cinema` to open straight in cinema mode (full-screen, no controls).
@@ -32,6 +36,7 @@ Each match writes a self-contained HTML viewer to `render.html` and opens it. Ap
 | File / folder | Purpose |
 |---|---|
 | [basic_run.py](basic_run.py) | Run one match. Writes an HTML viewer and opens it. |
+| [play_replay.py](play_replay.py) | Render the HTML viewer from an existing replay JSON or a Kaggle episode URL — no agents executed. |
 | [tournament.py](tournament.py) | Run N matches of the same lineup in parallel, tabbed HTML viewer. |
 | [visualize.py](visualize.py) | Generate the self-contained HTML viewer from an `env.toJSON()` dump. |
 | [bundle.py](bundle.py) | Bundle a multi-file bot into a single `submission.py` for Kaggle. |
@@ -62,6 +67,32 @@ The runner handles two awkward parts of running multiple bots in one Python proc
 - **Module name collisions.** If two bots both have a `physics.py`, the second one would clobber the first in `sys.modules`. The runner snapshots each bot's modules after load and swaps the right set back onto `sys.modules` (and onto `sys.path`) around each `act()` call, so each bot sees its own files.
 
 Output: `render.html` (or `--out path`) — open it in any browser, no server needed. Includes playback controls, planet trails, per-player resource graphs, and any per-step JSON debug data your bot prints to stderr.
+
+---
+
+## Replaying an existing match — `play_replay.py`
+
+Sometimes you already have a replay and just want to view it — e.g. a leaderboard match from Kaggle, or a JSON file shared by another player. No agents are executed; the replay JSON is fed straight into the viewer.
+
+```
+python play_replay.py SOURCE [--names NAME ...] [--out PATH] [--no-open] [--cinema]
+```
+
+`SOURCE` can be:
+
+- A local path to an `env.toJSON()` dump (`replay.json`, etc.)
+- A Kaggle episode URL like `https://www.kaggle.com/episodes/12345678` — the replay is fetched from Kaggle's public `EpisodeService.GetEpisodeReplay` endpoint (the same one the leaderboard "Replay" button uses). Any Kaggle URL containing `episode-<id>` or `?episodeId=<id>` also works.
+- Any other `http(s)` URL that returns the replay JSON directly
+
+```bash
+# Local replay
+python play_replay.py replay.json --cinema
+
+# Kaggle episode (no API key needed for public episodes)
+python play_replay.py https://www.kaggle.com/episodes/12345678 --names alice bob
+```
+
+If the replay metadata includes team names they're used automatically; otherwise pass `--names` to override.
 
 ---
 
